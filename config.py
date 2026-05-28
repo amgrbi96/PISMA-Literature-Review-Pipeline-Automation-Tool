@@ -215,6 +215,8 @@ class ResearchConfig(BaseModel):
     output_json: bool = True
     output_markdown: bool = True
     output_sqlite_exports: bool = True
+    output_ris: bool = True
+    output_bibtex: bool = True
     ui_settings_mode: Literal["compact", "advanced"] = "compact"
     ui_show_advanced_settings: bool = False
     analysis_passes: list[AnalysisPassConfig] = Field(default_factory=list)
@@ -1010,6 +1012,16 @@ class ResearchConfig(BaseModel):
                 getattr(args, "output_sqlite_exports", None),
                 True,
             ),
+            output_ris=value_for(
+                "output_ris",
+                getattr(args, "output_ris", None),
+                True,
+            ),
+            output_bibtex=value_for(
+                "output_bibtex",
+                getattr(args, "output_bibtex", None),
+                True,
+            ),
             ui_settings_mode=value_for("ui_settings_mode", getattr(args, "ui_settings_mode", None), "compact"),
             ui_show_advanced_settings=value_for(
                 "ui_show_advanced_settings",
@@ -1732,6 +1744,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Write SQLite decision export databases",
+    )
+    parser.add_argument(
+        "--output-ris",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Write RIS export for import into Covidence, Rayyan, or Zotero",
+    )
+    parser.add_argument(
+        "--output-bibtex",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Write BibTeX export for import into Zotero, Mendeley, or LaTeX bibliographies",
     )
     return parser
 

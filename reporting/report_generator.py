@@ -295,6 +295,14 @@ class ReportGenerator:
                 }
             )
 
+        if self.config.output_ris:
+            ris_path = self._write_ris_export(ranked)
+            outputs["ris_export"] = str(ris_path)
+
+        if self.config.output_bibtex:
+            bibtex_path = self._write_bibtex_export(ranked)
+            outputs["bibtex_export"] = str(bibtex_path)
+
         return outputs
 
     def _clear_previous_outputs(self) -> None:
@@ -313,6 +321,8 @@ class ReportGenerator:
                 "included_papers.db",
                 "excluded_papers.db",
                 "review_summary.md",
+                "papers.ris",
+                "papers.bib",
         ):
             path = Path(self.config.results_dir) / filename
             if path.exists():
@@ -550,6 +560,59 @@ class ReportGenerator:
                 f"- score {paper.relevance_score or 0:.1f}, decision {paper.inclusion_decision or 'unreviewed'}."
             )
         return "\n".join(lines)
+
+    def _write_ris_export(self, papers: list[PaperMetadata], filename: str = "papers.ris") -> Path:
+        path = Path(self.config.results_dir) / filename
+        entries: list[str] = []
+        for paper in papers:
+            lines = ["TY  - JOUR"]
+            if paper.title:
+                lines.append(f"TI  - {paper.title}")
+            for author in paper.authors or []:
+                lines.append(f"AU  - {author}")
+            if paper.year:
+                lines.append(f"PY  - {paper.year}")
+            if paper.venue:
+                lines.append(f"JO  - {paper.venue}")
+            if paper.doi:
+                lines.append(f"DO  - {paper.doi}")
+            if paper.abstract:
+                lines.append(f"AB  - {paper.abstract}")
+            if paper.external_ids and paper.external_ids.get("pubmed"):
+                lines.append(f"ID  - PMID:{paper.external_ids['pubmed']}")
+            lines.append("ER  - ")
+            entries.append("\n".join(lines))
+        self._write_text_artifact(path, "\n\n".join(entries))
+        return path
+
+    def _write_bibtex_export(self, papers: list[PaperMetadata], filename: str = "papers.bib") -> Path:
+        path = Path(self.config.results_dir) / filename
+        entries: list[str] = []
+        for paper in papers:
+            cite_key = self._bibtex_cite_key(paper)
+            lines = [f"@article{{{cite_key},"]
+            if paper.title:
+                lines.append(f"  title = {{{paper.title}}},")
+            if paper.authors:
+                lines.append(f"  author = {{{' and '.join(paper.authors)}}},")
+            if paper.year:
+                lines.append(f"  year = {{{paper.year}}},")
+            if paper.venue:
+                lines.append(f"  journal = {{{paper.venue}}},")
+            if paper.doi:
+                lines.append(f"  doi = {{{paper.doi}}},")
+            if paper.abstract:
+                lines.append(f"  abstract = {{{paper.abstract}}},")
+            lines.append("}")
+            entries.append("\n".join(lines))
+        self._write_text_artifact(path, "\n\n".join(entries))
+        return path
+
+    def _bibtex_cite_key(self, paper: PaperMetadata) -> str:
+        first_author = paper.authors[0].split()[-1].lower() if paper.authors else "unknown"
+        year = paper.year or "nd"
+        title_word = paper.title.split()[0].lower() if paper.title else "untitled"
+        return f"{first_author}{year}{title_word}"
 
     def _final_threshold(self) -> float:
         resolved_passes = self.config.resolved_analysis_passes
