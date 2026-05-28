@@ -202,6 +202,8 @@ class ResearchConfig(BaseModel):
     skip_discovery: bool = False
     citation_snowballing_enabled: bool = True
     mesh_expansion_enabled: bool | None = None
+    snowballing_depth: int = 1
+    snowballing_per_direction_limit: int = 10
     relevance_threshold: float = 70.0
     download_pdfs: bool = False
     pdf_download_mode: Literal["all", "relevant_only"] = "all"
@@ -995,6 +997,16 @@ class ResearchConfig(BaseModel):
                 getattr(args, "mesh_expansion_enabled", None),
                 None,
             ),
+            snowballing_depth=value_for(
+                "snowballing_depth",
+                getattr(args, "snowballing_depth", None),
+                1,
+            ),
+            snowballing_per_direction_limit=value_for(
+                "snowballing_per_direction_limit",
+                getattr(args, "snowballing_per_direction_limit", None),
+                10,
+            ),
             relevance_threshold=relevance_threshold,
             download_pdfs=download_pdfs,
             pdf_download_mode=value_for("pdf_download_mode", getattr(args, "pdf_download_mode", None), "all"),
@@ -1280,6 +1292,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Enable automatic MeSH term expansion for PubMed queries",
+    )
+    parser.add_argument(
+        "--snowballing-depth",
+        type=int,
+        dest="snowballing_depth",
+        help="Number of citation expansion iterations (default 1)",
+    )
+    parser.add_argument(
+        "--snowballing-per-direction-limit",
+        type=int,
+        dest="snowballing_per_direction_limit",
+        help="Maximum papers to fetch per direction per seed per iteration (default 10)",
     )
     parser.add_argument(
         "--download-pdfs",
