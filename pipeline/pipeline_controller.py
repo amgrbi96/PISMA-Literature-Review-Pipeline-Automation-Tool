@@ -7,6 +7,8 @@ import logging
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event
 from typing import Any
@@ -38,6 +40,18 @@ from utils.http import configure_http_logging, configure_http_runtime
 from utils.text_processing import stable_hash
 
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class SourceQueryRecord:
+    """Per-source metadata captured during the discovery phase."""
+
+    source: str
+    started_at: str = ""
+    finished_at: str = ""
+    duration_seconds: float = 0.0
+    results_returned: int = 0
+    query_variants: list[str] = field(default_factory=list)
 
 
 class PipelineStoppedError(RuntimeError):
@@ -119,6 +133,7 @@ class PipelineController:
         citation_provider = self.fixture_client or (self.openalex_client if self.config.openalex_enabled else NullCitationProvider())
         self.citation_expander = CitationExpander(self.config, self.database, citation_provider)
         self.report_generator = ReportGenerator(self.config, self.ai_screener)
+        self.search_query_records: list[SourceQueryRecord] = []
         if self.config.citation_snowballing_enabled and isinstance(citation_provider, NullCitationProvider):
             LOGGER.info("Citation snowballing is enabled, but no citation-capable API source is active; skipping expansion.")
         if self._requires_local_llm_serial_execution():
@@ -370,6 +385,7 @@ class PipelineController:
             deduplicated_count=deduplicated_count,
             snowballing_added_count=snowballing_added_count,
             screening_stats=screening_stats,
+            source_query_records=self.search_query_records,
         )
         report_paths = self.report_generator.generate(final_papers, stats=stats)
         self._log_verbose("Generated %s report artifacts.", len(report_paths))
@@ -396,6 +412,7 @@ class PipelineController:
             deduplicated_count: int,
             snowballing_added_count: int,
             screening_stats: dict[str, int],
+            source_query_records: list[SourceQueryRecord] | None = None,
     ) -> dict[str, Any]:
         """Build the shared reporting stats payload used by full and partial runs."""
 
@@ -409,6 +426,17 @@ class PipelineController:
             "full_text_screened_count": screening_stats["full_text_screened_count"],
             "run_mode": self.config.run_mode,
             "partial_rerun_mode": self.config.partial_rerun_mode,
+            "source_query_records": [
+                {
+                    "source": rec.source,
+                    "started_at": rec.started_at,
+                    "finished_at": rec.finished_at,
+                    "duration_seconds": rec.duration_seconds,
+                    "results_returned": rec.results_returned,
+                    "query_variants": rec.query_variants,
+                }
+                for rec in (source_query_records or [])
+            ],
         }
 
     def _discover(self) -> list[PaperMetadata]:
@@ -853,13 +881,26 @@ class PipelineController:
             source_name: str,
             search_callable: Callable[[], list[PaperMetadata]],
     ) -> list[PaperMetadata]:
-        """Run one discovery client and emit source-level progress events."""
+        """Run one discovery client, record query metadata, and emit source-level progress events."""
 
         self._log_verbose("Querying %s.", source_name)
         self._emit_event("source_requested", source=source_name)
+        started_at = datetime.now(tz=timezone.utc).isoformat()
         source_started = time.perf_counter()
         records = search_callable()
-        self._log_verbose("%s returned %s records in %.2f seconds.", source_name, len(records), time.perf_counter() - source_started)
+        duration = time.perf_counter() - source_started
+        finished_at = datetime.now(tz=timezone.utc).isoformat()
+        self._log_verbose("%s returned %s records in %.2f seconds.", source_name, len(records), duration)
+        self.search_query_records.append(
+            SourceQueryRecord(
+                source=source_name,
+                started_at=started_at,
+                finished_at=finished_at,
+                duration_seconds=round(duration, 3),
+                results_returned=len(records),
+                query_variants=list(self.config.discovery_queries),
+            )
+        )
         return records
 
     def _config_for_analysis_pass(self, analysis_pass: AnalysisPassConfig) -> ResearchConfig:

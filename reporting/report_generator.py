@@ -303,6 +303,11 @@ class ReportGenerator:
             bibtex_path = self._write_bibtex_export(ranked)
             outputs["bibtex_export"] = str(bibtex_path)
 
+        strategy_md_path = self._write_search_strategy_md(stats or {})
+        strategy_json_path = self._write_search_strategy_json(stats or {})
+        outputs["search_strategy_md"] = str(strategy_md_path)
+        outputs["search_strategy_json"] = str(strategy_json_path)
+
         return outputs
 
     def _clear_previous_outputs(self) -> None:
@@ -323,6 +328,8 @@ class ReportGenerator:
                 "review_summary.md",
                 "papers.ris",
                 "papers.bib",
+                "search_strategy.md",
+                "search_strategy.json",
         ):
             path = Path(self.config.results_dir) / filename
             if path.exists():
@@ -560,6 +567,78 @@ class ReportGenerator:
                 f"- score {paper.relevance_score or 0:.1f}, decision {paper.inclusion_decision or 'unreviewed'}."
             )
         return "\n".join(lines)
+
+    def _write_search_strategy_md(self, stats: dict[str, Any]) -> Path:
+        path = Path(self.config.results_dir) / "search_strategy.md"
+        source_records = stats.get("source_query_records", [])
+        lines = [
+            "# Search Strategy",
+            "",
+            "## Search Parameters",
+            f"- **Research topic**: {self.config.research_topic}",
+            f"- **Keywords**: {', '.join(self.config.search_keywords)}",
+            f"- **Boolean operator**: {self.config.boolean_operators}",
+            f"- **Year range**: {self.config.year_range_start}–{self.config.year_range_end}",
+            f"- **Discovery strategy**: {self.config.discovery_strategy}",
+            f"- **MeSH expansion**: {'enabled' if self.config.effective_mesh_expansion_enabled else 'disabled'}",
+            f"- **Citation snowballing**: depth {self.config.snowballing_depth}, limit {self.config.snowballing_per_direction_limit}/direction",
+            "",
+            "## Query Variants",
+            "",
+        ]
+        for query in self.config.discovery_queries:
+            lines.append(f"- `{query}`")
+        lines.append("")
+        if source_records:
+            lines.append("## Source Results")
+            lines.append("")
+            lines.append("| Source | Started (UTC) | Duration (s) | Results |")
+            lines.append("|--------|---------------|-------------|---------|")
+            for rec in source_records:
+                lines.append(
+                    f"| {rec['source']} | {rec['started_at'][:19]} | {rec['duration_seconds']:.1f} | {rec['results_returned']} |"
+                )
+            lines.append("")
+        lines.append("## Deduplication")
+        lines.append(
+            f"- Records before deduplication: {stats.get('discovered_count', 'N/A')}"
+        )
+        lines.append(
+            f"- Records after deduplication: {stats.get('deduplicated_count', 'N/A')}"
+        )
+        lines.append(
+            f"- Title similarity threshold: {self.config.title_similarity_threshold}"
+        )
+        lines.append(
+            f"- Records added via snowballing: {stats.get('snowballing_added_count', 0)}"
+        )
+        self._write_text_artifact(path, "\n".join(lines))
+        return path
+
+    def _write_search_strategy_json(self, stats: dict[str, Any]) -> Path:
+        path = Path(self.config.results_dir) / "search_strategy.json"
+        payload = {
+            "search_parameters": {
+                "research_topic": self.config.research_topic,
+                "keywords": self.config.search_keywords,
+                "boolean_operator": self.config.boolean_operators,
+                "year_range": [self.config.year_range_start, self.config.year_range_end],
+                "discovery_strategy": self.config.discovery_strategy,
+                "mesh_expansion_enabled": self.config.effective_mesh_expansion_enabled,
+                "snowballing_depth": self.config.snowballing_depth,
+                "snowballing_per_direction_limit": self.config.snowballing_per_direction_limit,
+            },
+            "query_variants": list(self.config.discovery_queries),
+            "source_results": stats.get("source_query_records", []),
+            "deduplication": {
+                "records_before": stats.get("discovered_count"),
+                "records_after": stats.get("deduplicated_count"),
+                "title_similarity_threshold": self.config.title_similarity_threshold,
+                "snowballing_added": stats.get("snowballing_added_count", 0),
+            },
+        }
+        self._write_json_artifact(path, payload)
+        return path
 
     def _write_ris_export(self, papers: list[PaperMetadata], filename: str = "papers.ris") -> Path:
         path = Path(self.config.results_dir) / filename
