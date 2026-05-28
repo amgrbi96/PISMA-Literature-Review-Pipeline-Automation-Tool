@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import logging
 import xml.etree.ElementTree as ET
 
 from config import ResearchConfig
 from models.paper import PaperMetadata
 from utils.http import RateLimiter, build_session, request_json
+from utils.mesh_lookup import lookup_mesh_terms
 from utils.text_processing import chunked, normalize_text, safe_year
+
+logger = logging.getLogger(__name__)
 
 
 class PubMedClient:
@@ -26,11 +30,23 @@ class PubMedClient:
 
         if not self.config.include_pubmed:
             return []
+
+        mesh_terms = {}
+        if self.config.effective_mesh_expansion_enabled:
+            mesh_terms = lookup_mesh_terms(
+                self.config.search_keywords,
+                config=self.config,
+                session=self.session,
+                limiter=self.limiter,
+                timeout=self.config.request_timeout_seconds,
+            )
+
         papers: list[PaperMetadata] = []
         seen_pmids: set[str] = set()
         for query in self.config.discovery_queries:
+            expanded = self._expand_with_mesh(query, mesh_terms)
             search_term = (
-                f"({query}) AND "
+                f"({expanded}) AND "
                 f"({self.config.year_range_start}:{self.config.year_range_end}[pdat])"
             )
             payload = request_json(
@@ -61,6 +77,15 @@ class PubMedClient:
             if len(papers) >= self.config.per_source_limit:
                 break
         return papers[: self.config.per_source_limit]
+
+    def _expand_with_mesh(self, query: str, mesh_terms: dict) -> str:
+        if not mesh_terms:
+            return query
+        parts = [query]
+        for keyword, mesh in mesh_terms.items():
+            if mesh.descriptor_name and mesh.descriptor_name.lower() not in query.lower():
+                parts.append(f'"{mesh.descriptor_name}"[MeSH Terms]')
+        return " OR ".join(parts)
 
     def _fetch_batch(self, pmids: list[str]) -> list[PaperMetadata]:
         """Fetch a batch of PubMed XML records for a list of PMIDs."""

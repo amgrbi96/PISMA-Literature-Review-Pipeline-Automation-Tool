@@ -201,6 +201,7 @@ class ResearchConfig(BaseModel):
     ai_evaluation_enabled: bool = True
     skip_discovery: bool = False
     citation_snowballing_enabled: bool = True
+    mesh_expansion_enabled: bool | None = None
     relevance_threshold: float = 70.0
     download_pdfs: bool = False
     pdf_download_mode: Literal["all", "relevant_only"] = "all"
@@ -653,6 +654,10 @@ class ResearchConfig(BaseModel):
 
         return self.screening_workers or self.max_workers
 
+    @property
+    def effective_mesh_expansion_enabled(self) -> bool:
+        return self.mesh_expansion_enabled if self.mesh_expansion_enabled is not None else bool(self.include_pubmed)
+
     def finalize(self) -> "ResearchConfig":
         """Resolve derived values and ensure the configured output directories exist."""
 
@@ -985,6 +990,11 @@ class ResearchConfig(BaseModel):
                 0,
             ),
             citation_snowballing_enabled=citation_snowballing,
+            mesh_expansion_enabled=value_for(
+                "mesh_expansion_enabled",
+                getattr(args, "mesh_expansion_enabled", None),
+                None,
+            ),
             relevance_threshold=relevance_threshold,
             download_pdfs=download_pdfs,
             pdf_download_mode=value_for("pdf_download_mode", getattr(args, "pdf_download_mode", None), "all"),
@@ -1264,6 +1274,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         dest="citation_snowballing_enabled",
         help="Enable or disable backward and forward citation expansion",
+    )
+    parser.add_argument(
+        "--mesh-expansion-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable automatic MeSH term expansion for PubMed queries",
     )
     parser.add_argument(
         "--download-pdfs",
