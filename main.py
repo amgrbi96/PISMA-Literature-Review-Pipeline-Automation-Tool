@@ -62,6 +62,7 @@ def _run_headless(args) -> int:
         "review_summary_md": "Review summary",
         "search_strategy_md": "Search strategy Markdown",
         "search_strategy_json": "Search strategy JSON",
+        "prisma_flow_mermaid": "PRISMA flow Mermaid",
     }
     for key, label in output_labels.items():
         if key in result:

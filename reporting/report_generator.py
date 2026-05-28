@@ -308,6 +308,9 @@ class ReportGenerator:
         outputs["search_strategy_md"] = str(strategy_md_path)
         outputs["search_strategy_json"] = str(strategy_json_path)
 
+        mermaid_path = self._write_prisma_flow_mermaid(ranked, shortlisted, excluded, stats or {})
+        outputs["prisma_flow_mermaid"] = str(mermaid_path)
+
         return outputs
 
     def _clear_previous_outputs(self) -> None:
@@ -330,6 +333,7 @@ class ReportGenerator:
                 "papers.bib",
                 "search_strategy.md",
                 "search_strategy.json",
+                "prisma_flow.mermaid",
         ):
             path = Path(self.config.results_dir) / filename
             if path.exists():
@@ -478,6 +482,44 @@ class ReportGenerator:
             "",
             "## Included",
             f"- Studies included: {len(included)}",
+        ]
+        self._write_text_artifact(path, "\n".join(lines))
+        return path
+
+    def _write_prisma_flow_mermaid(
+            self,
+            ranked: list[PaperMetadata],
+            included: list[PaperMetadata],
+            excluded: list[PaperMetadata],
+            stats: dict[str, Any],
+    ) -> Path:
+        path = Path(self.config.results_dir) / "prisma_flow.mermaid"
+        decision_counts = stats.get("decision_counts", {})
+        identified = stats.get("discovered_count", len(ranked))
+        after_dedup = stats.get("deduplicated_count", len(ranked))
+        snowballed = stats.get("snowballing_added_count", 0)
+        screened = stats.get("screened_count", len([paper for paper in ranked if paper.inclusion_decision]))
+        n_excluded = len(excluded)
+        n_maybe = decision_counts.get("maybe", 0)
+        n_included = len(included)
+
+        lines = [
+            "flowchart TD",
+            f'    A["Records identified (n={identified})"]',
+            f'    B["After deduplication (n={after_dedup})"]',
+            f'    C["Added via snowballing (n={snowballed})"]',
+            f'    D["Records screened (n={screened})"]',
+            f'    E["Excluded (n={n_excluded})"]',
+            f'    F["Maybe (n={n_maybe})"]',
+            f'    G["Included (n={n_included})"]',
+            "",
+            "    A --> B",
+            "    B --> D",
+            "    C --> D",
+            "    D --> E",
+            "    D --> F",
+            "    D --> G",
+            "",
         ]
         self._write_text_artifact(path, "\n".join(lines))
         return path
