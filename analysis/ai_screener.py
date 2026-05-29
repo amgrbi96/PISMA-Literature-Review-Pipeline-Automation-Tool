@@ -7,7 +7,7 @@ import logging
 from typing import Any, cast
 
 from config import ResearchConfig
-from models.paper import DecisionLabel, PaperMetadata, ScreeningResult
+from models.paper import DecisionLabel, ExclusionCode, PaperMetadata, ScreeningResult
 from .llm_clients import build_llm_client
 from .relevance_scoring import RelevanceScorer
 from .topic_prefilter import build_topic_matcher
@@ -184,8 +184,12 @@ class AIScreener:
         prompt = (
             "Assess the paper and return JSON with keys: relevance_score (0-100), explanation, "
             "extracted_passage, methodology_category, domain_category, decision, retain_reason, "
-            "exclusion_reason, matched_inclusion_criteria, matched_exclusion_criteria, matched_banned_topics. "
+            "exclusion_reason, exclusion_code, matched_inclusion_criteria, matched_exclusion_criteria, matched_banned_topics. "
             "Also return matched_excluded_title_terms. "
+            "exclusion_code must be one of: POP_MISMATCH (population outside scope), "
+            "INT_MISMATCH (intervention not relevant), OUT_MISMATCH (outcome not measured), "
+            "DESIGN_MISMATCH (study design ineligible), LANGUAGE, DUPLICATE, FULL_TEXT_UNAVAILABLE, OTHER. "
+            "Set exclusion_code only when decision is exclude.\n"
             "Use the criteria topical match, methodological relevance, theoretical contribution, "
             "recency, citation strength.\n"
             f"{self.config.screening_brief}\n"
@@ -237,6 +241,7 @@ class AIScreener:
                 matched_excluded_title_terms=list(parsed.get("matched_excluded_title_terms", []) or []),
                 retain_reason=str(parsed.get("retain_reason", "")),
                 exclusion_reason=str(parsed.get("exclusion_reason", "")),
+                exclusion_code=cast(ExclusionCode | None, parsed.get("exclusion_code")),
                 screening_context_key=self.config.screening_context_key,
             )
         except Exception as exc:  # noqa: BLE001

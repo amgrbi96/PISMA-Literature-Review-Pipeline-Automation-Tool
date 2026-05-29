@@ -10,6 +10,17 @@ from utils.text_processing import canonical_doi, normalize_title
 
 DecisionLabel = Literal["include", "maybe", "exclude"]
 
+ExclusionCode = Literal[
+    "POP_MISMATCH",
+    "INT_MISMATCH",
+    "OUT_MISMATCH",
+    "DESIGN_MISMATCH",
+    "LANGUAGE",
+    "DUPLICATE",
+    "FULL_TEXT_UNAVAILABLE",
+    "OTHER",
+]
+
 
 class ScreeningResult(BaseModel):
     """Structured outcome returned by the heuristic or LLM-assisted screening step."""
@@ -41,6 +52,7 @@ class ScreeningResult(BaseModel):
     matched_excluded_title_terms: list[str] = Field(default_factory=list)
     retain_reason: str = ""
     exclusion_reason: str = ""
+    exclusion_code: ExclusionCode | None = None
     screening_context_key: str | None = None
 
 

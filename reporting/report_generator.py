@@ -74,6 +74,7 @@ def _paper_to_dict(paper: PaperMetadata, pass_names: list[str] | None = None) ->
         "inclusion_decision": paper.inclusion_decision,
         "retain_reason": paper.screening_details.get("retain_reason", ""),
         "exclusion_reason": paper.screening_details.get("exclusion_reason", ""),
+        "exclusion_code": paper.screening_details.get("exclusion_code", ""),
         "matched_inclusion_criteria": json.dumps(
             paper.screening_details.get("matched_inclusion_criteria", []),
             ensure_ascii=False,
@@ -105,6 +106,7 @@ def _paper_to_dict(paper: PaperMetadata, pass_names: list[str] | None = None) ->
                 pass_payload.get("skip_reason")
                 or pass_payload.get("retain_reason")
                 or pass_payload.get("exclusion_reason")
+                or pass_payload.get("exclusion_code")
                 or pass_payload.get("explanation")
                 or ""
         )
@@ -149,6 +151,7 @@ def _paper_to_dict_keys(pass_names: list[str] | None = None) -> list[str]:
         "inclusion_decision",
         "retain_reason",
         "exclusion_reason",
+        "exclusion_code",
         "matched_inclusion_criteria",
         "matched_exclusion_criteria",
         "matched_banned_topics",
