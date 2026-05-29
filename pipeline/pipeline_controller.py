@@ -41,6 +41,7 @@ from utils.http import configure_http_logging, configure_http_runtime
 from utils.text_processing import stable_hash
 from utils.checkpoints import write_checkpoint
 from utils.deduplication import DeduplicationResult
+from utils.source_verification import verify_sources
 
 LOGGER = logging.getLogger(__name__)
 
@@ -138,6 +139,7 @@ class PipelineController:
         self.report_generator = ReportGenerator(self.config, self.ai_screener)
         self.search_query_records: list[SourceQueryRecord] = []
         self.metadata_quality_report: dict[str, Any] | None = None
+        self.verification_verdicts: list[Any] = []
         self.gate_checker = GateChecker()
         if self.config.citation_snowballing_enabled and isinstance(citation_provider, NullCitationProvider):
             LOGGER.info("Citation snowballing is enabled, but no citation-capable API source is active; skipping expansion.")
@@ -315,6 +317,12 @@ class PipelineController:
                 write_checkpoint(screened_papers, "post_screening", self.config.results_dir,
                                  extra={"screened_count": screening_stats["screened_count"],
                                         "full_text_screened_count": screening_stats["full_text_screened_count"]})
+                verified, verification_verdicts = verify_sources(screened_papers, self.config)
+                self.verification_verdicts = verification_verdicts
+                if len(verified) < len(screened_papers):
+                    removed = len(screened_papers) - len(verified)
+                    LOGGER.warning("Source verification removed %s papers.", removed)
+                    self._emit_event("source_verification", removed=removed, total=len(screened_papers))
                 if self.config.download_pdfs and self.config.pdf_download_mode == "relevant_only":
                     LOGGER.info("Downloading relevant PDFs for screened records.")
                     relevant_pdf_updates = self._download_relevant_pdfs(
@@ -487,6 +495,16 @@ class PipelineController:
             "partial_rerun_mode": self.config.partial_rerun_mode,
             "metadata_quality_report": self.metadata_quality_report,
             "gate_summary": self.gate_checker.summary(),
+            "source_verification": [
+                {
+                    "paper_identity": v.paper_identity,
+                    "tier": v.tier,
+                    "method": v.method,
+                    "verdict": v.verdict,
+                    "detail": v.detail,
+                }
+                for v in self.verification_verdicts
+            ],
             "source_query_records": [
                 {
                     "source": rec.source,

@@ -338,6 +338,11 @@ class ReportGenerator:
         retrieval_path = self._write_retrieval_log(ranked)
         outputs["retrieval_log"] = str(retrieval_path)
 
+        verification_data = (stats or {}).get("source_verification")
+        if verification_data:
+            ver_path = self._write_source_verification_json(verification_data)
+            outputs["source_verification_json"] = str(ver_path)
+
         return outputs
 
     def _clear_previous_outputs(self) -> None:
@@ -368,6 +373,7 @@ class ReportGenerator:
                 "dedup_audit_trail.json",
                 "checkpoint_duplicates.json",
                 "retrieval_log.json",
+                "source_verification.json",
         ):
             path = Path(self.config.results_dir) / filename
             if path.exists():
@@ -748,6 +754,25 @@ class ReportGenerator:
                 "title_similarity_threshold": self.config.title_similarity_threshold,
                 "snowballing_added": stats.get("snowballing_added_count", 0),
             },
+        }
+        self._write_json_artifact(path, payload)
+        return path
+
+    def _write_source_verification_json(self, verdicts: list[dict[str, Any]]) -> Path:
+        path = Path(self.config.results_dir) / "source_verification.json"
+        verified = sum(1 for v in verdicts if v.get("verdict") == "VERIFIED")
+        plausible = sum(1 for v in verdicts if v.get("verdict") == "PLAUSIBLE")
+        unverifiable = sum(1 for v in verdicts if v.get("verdict") == "UNVERIFIABLE")
+        fabricated = sum(1 for v in verdicts if v.get("verdict") == "FABRICATED")
+        payload = {
+            "summary": {
+                "total": len(verdicts),
+                "verified": verified,
+                "plausible": plausible,
+                "unverifiable": unverifiable,
+                "fabricated": fabricated,
+            },
+            "verdicts": verdicts,
         }
         self._write_json_artifact(path, payload)
         return path
