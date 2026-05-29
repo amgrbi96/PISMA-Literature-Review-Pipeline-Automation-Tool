@@ -346,6 +346,8 @@ class ReportGenerator:
                 "checkpoint_post_discovery.json",
                 "checkpoint_post_dedup.json",
                 "checkpoint_post_screening.json",
+                "dedup_audit_trail.json",
+                "checkpoint_duplicates.json",
         ):
             path = Path(self.config.results_dir) / filename
             if path.exists():

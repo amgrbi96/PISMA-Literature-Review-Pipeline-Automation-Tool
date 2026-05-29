@@ -35,10 +35,11 @@ from discovery.semantic_scholar_client import SemanticScholarClient
 from discovery.springer_client import SpringerClient
 from models.paper import PaperMetadata, ScreeningResult
 from reporting.report_generator import ReportGenerator
-from utils.deduplication import deduplicate_papers
+from utils.deduplication import deduplicate_papers, deduplicate_papers_with_trail
 from utils.http import configure_http_logging, configure_http_runtime
 from utils.text_processing import stable_hash
 from utils.checkpoints import write_checkpoint
+from utils.deduplication import DeduplicationResult
 
 LOGGER = logging.getLogger(__name__)
 
@@ -192,14 +193,16 @@ class PipelineController:
                 LOGGER.info("Discovery completed with %s records.", len(discovered))
                 write_checkpoint(discovered, "post_discovery", self.config.results_dir,
                                  extra={"source_query_records": [r.__dict__ for r in self.search_query_records]})
-                deduplicated = deduplicate_papers(
+                dedup_result = deduplicate_papers_with_trail(
                     discovered,
                     title_similarity_threshold=self.config.title_similarity_threshold,
                 )
-                deduplicated = self._apply_discovery_limits(deduplicated)
-                LOGGER.info("Deduplication completed with %s unique records.", len(deduplicated))
+                deduplicated = self._apply_discovery_limits(dedup_result.unique)
+                LOGGER.info("Deduplication completed with %s unique records (%s duplicates).", len(deduplicated), len(dedup_result.duplicates))
                 write_checkpoint(deduplicated, "post_dedup", self.config.results_dir,
-                                 extra={"discovered_count": len(discovered), "deduplicated_count": len(deduplicated)})
+                                 extra={"discovered_count": len(discovered), "deduplicated_count": len(deduplicated),
+                                         "duplicate_count": len(dedup_result.duplicates)})
+                self._write_dedup_audit_trail(dedup_result)
                 stored = self.database.upsert_papers(deduplicated, self.config.query_key or "")
                 self._log_verbose("Stored %s records in SQLite.", len(stored))
                 self._log_verbose("Discovery and deduplication took %.2f seconds.", time.perf_counter() - discovery_started)
@@ -1225,6 +1228,33 @@ class PipelineController:
         """Check whether discovery found enough unique records to justify screening."""
 
         return self.config.min_discovered_records > 0 and discovered_count < self.config.min_discovered_records
+
+    def _write_dedup_audit_trail(self, result: DeduplicationResult) -> None:
+        """Persist the deduplication audit trail and separated duplicates."""
+
+        import json
+        results_dir = Path(self.config.results_dir)
+        results_dir.mkdir(parents=True, exist_ok=True)
+
+        audit_path = results_dir / "dedup_audit_trail.json"
+        audit_payload = [
+            {
+                "kept_id": entry.kept_id,
+                "removed_id": entry.removed_id,
+                "kept_source": entry.kept_source,
+                "removed_source": entry.removed_source,
+                "method": entry.method,
+                "similarity": entry.similarity,
+                "reason": entry.reason,
+            }
+            for entry in result.audit_trail
+        ]
+        audit_path.write_text(json.dumps(audit_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        LOGGER.info("Dedup audit trail written: %s entries.", len(result.audit_trail))
+
+        if result.duplicates:
+            write_checkpoint(result.duplicates, "duplicates", self.config.results_dir)
+            LOGGER.info("Separated %s duplicate records preserved.", len(result.duplicates))
 
     def _validate_metadata_quality(self, papers: list[PaperMetadata]) -> dict[str, Any]:
         """Check every record for required fields and produce a per-database quality report."""
