@@ -337,6 +337,13 @@ class PipelineController:
                     self.database.get_papers_for_query(self.config.query_key or "")
                 )
             )
+            self._verify_count_consistency(
+                discovered_count=len(discovered),
+                deduplicated_count=len(deduplicated),
+                snowballing_count=len(expanded) if expanded else 0,
+                screened_count=screening_stats["screened_count"],
+                final_count=len(final_papers),
+            )
             self._log_verbose("Pipeline finished in %.2f seconds.", time.perf_counter() - pipeline_started)
             return self._finalize_run_result(
                 final_papers=final_papers,
@@ -1283,6 +1290,65 @@ class PipelineController:
         return self.config.min_discovered_records > 0 and discovered_count < self.config.min_discovered_records
 
     def _write_dedup_audit_trail(self, result: DeduplicationResult) -> None:
+        """Persist the deduplication audit trail and separated duplicates."""
+
+        import json
+        results_dir = Path(self.config.results_dir)
+        results_dir.mkdir(parents=True, exist_ok=True)
+
+        audit_path = results_dir / "dedup_audit_trail.json"
+        audit_payload = [
+            {
+                "kept_id": entry.kept_id,
+                "removed_id": entry.removed_id,
+                "kept_source": entry.kept_source,
+                "removed_source": entry.removed_source,
+                "method": entry.method,
+                "similarity": entry.similarity,
+                "reason": entry.reason,
+            }
+            for entry in result.audit_trail
+        ]
+        audit_path.write_text(json.dumps(audit_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        LOGGER.info("Dedup audit trail written: %s entries.", len(result.audit_trail))
+
+        if result.duplicates:
+            write_checkpoint(result.duplicates, "duplicates", self.config.results_dir)
+            LOGGER.info("Separated %s duplicate records preserved.", len(result.duplicates))
+
+    def _verify_count_consistency(
+            self,
+            *,
+            discovered_count: int,
+            deduplicated_count: int,
+            snowballing_count: int,
+            screened_count: int,
+            final_count: int,
+    ) -> None:
+        """Check cross-component count consistency and warn on discrepancies."""
+
+        checks: list[tuple[str, bool, str]] = []
+
+        checks.append((
+            "discovered >= deduplicated",
+            discovered_count >= deduplicated_count,
+            f"discovered ({discovered_count}) < deduplicated ({deduplicated_count})",
+        ))
+        checks.append((
+            "screened <= deduplicated + snowballed",
+            screened_count <= deduplicated_count + snowballing_count,
+            f"screened ({screened_count}) > deduplicated ({deduplicated_count}) + snowballed ({snowballing_count})",
+        ))
+        checks.append((
+            "final <= deduplicated + snowballed",
+            final_count <= deduplicated_count + snowballing_count,
+            f"final ({final_count}) > deduplicated ({deduplicated_count}) + snowballed ({snowballing_count})",
+        ))
+
+        for name, passed, message in checks:
+            if not passed:
+                LOGGER.warning("Count consistency issue: %s — %s", name, message)
+                self._emit_event("count_inconsistency", check=name, message=message)
         """Persist the deduplication audit trail and separated duplicates."""
 
         import json
