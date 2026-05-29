@@ -94,6 +94,8 @@ class PaperMetadata(BaseModel):
     external_ids: dict[str, str] = Field(default_factory=dict)
     raw_payload: dict[str, Any] = Field(default_factory=dict)
     screening_details: dict[str, Any] = Field(default_factory=dict)
+    retrieval_status: str = ""
+    retrieval_method: str = ""
 
     @classmethod
     def validate_title(cls, value: str) -> str:

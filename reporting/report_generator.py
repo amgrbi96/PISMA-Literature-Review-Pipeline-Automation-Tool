@@ -335,6 +335,9 @@ class ReportGenerator:
             quality_path = self._write_metadata_quality_json(quality_report)
             outputs["metadata_quality_json"] = str(quality_path)
 
+        retrieval_path = self._write_retrieval_log(ranked)
+        outputs["retrieval_log"] = str(retrieval_path)
+
         return outputs
 
     def _clear_previous_outputs(self) -> None:
@@ -364,6 +367,7 @@ class ReportGenerator:
                 "checkpoint_post_screening.json",
                 "dedup_audit_trail.json",
                 "checkpoint_duplicates.json",
+                "retrieval_log.json",
         ):
             path = Path(self.config.results_dir) / filename
             if path.exists():
@@ -557,6 +561,37 @@ class ReportGenerator:
     def _write_metadata_quality_json(self, report: dict[str, Any]) -> Path:
         path = Path(self.config.results_dir) / "metadata_quality.json"
         self._write_json_artifact(path, report)
+        return path
+
+    def _write_retrieval_log(self, papers: list[PaperMetadata]) -> Path:
+        path = Path(self.config.results_dir) / "retrieval_log.json"
+        entries = []
+        for paper in papers:
+            if paper.retrieval_status or paper.retrieval_method or paper.pdf_link or paper.pdf_path:
+                entries.append({
+                    "title": paper.title,
+                    "doi": paper.doi,
+                    "source": paper.source,
+                    "retrieval_status": paper.retrieval_status or "UNKNOWN",
+                    "retrieval_method": paper.retrieval_method or "",
+                    "pdf_link": paper.pdf_link or "",
+                    "pdf_path": paper.pdf_path or "",
+                    "open_access": paper.open_access,
+                })
+        total = len(papers)
+        retrieved = sum(1 for p in papers if p.retrieval_status == "RETRIEVED")
+        rate = (retrieved / max(total, 1)) * 100
+        payload = {
+            "summary": {
+                "total_papers": total,
+                "retrieved": retrieved,
+                "preprint_only": sum(1 for p in papers if p.retrieval_status == "PREPRINT_ONLY"),
+                "unretrieved": sum(1 for p in papers if p.retrieval_status == "UNRETRIEVED"),
+                "retrieval_rate_pct": round(rate, 1),
+            },
+            "entries": entries,
+        }
+        self._write_json_artifact(path, payload)
         return path
 
     def _write_decision_database(self, filename: str, table_name: str, papers: list[PaperMetadata]) -> Path:
