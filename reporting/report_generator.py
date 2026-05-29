@@ -343,6 +343,9 @@ class ReportGenerator:
                 "search_strategy.json",
                 "prisma_flow.mermaid",
                 "metadata_quality.json",
+                "checkpoint_post_discovery.json",
+                "checkpoint_post_dedup.json",
+                "checkpoint_post_screening.json",
         ):
             path = Path(self.config.results_dir) / filename
             if path.exists():

@@ -38,6 +38,7 @@ from reporting.report_generator import ReportGenerator
 from utils.deduplication import deduplicate_papers
 from utils.http import configure_http_logging, configure_http_runtime
 from utils.text_processing import stable_hash
+from utils.checkpoints import write_checkpoint
 
 LOGGER = logging.getLogger(__name__)
 
@@ -189,12 +190,16 @@ class PipelineController:
                 discovered = self._discover()
                 self._emit_event("stage_finished", stage="discovery", record_count=len(discovered))
                 LOGGER.info("Discovery completed with %s records.", len(discovered))
+                write_checkpoint(discovered, "post_discovery", self.config.results_dir,
+                                 extra={"source_query_records": [r.__dict__ for r in self.search_query_records]})
                 deduplicated = deduplicate_papers(
                     discovered,
                     title_similarity_threshold=self.config.title_similarity_threshold,
                 )
                 deduplicated = self._apply_discovery_limits(deduplicated)
                 LOGGER.info("Deduplication completed with %s unique records.", len(deduplicated))
+                write_checkpoint(deduplicated, "post_dedup", self.config.results_dir,
+                                 extra={"discovered_count": len(discovered), "deduplicated_count": len(deduplicated)})
                 stored = self.database.upsert_papers(deduplicated, self.config.query_key or "")
                 self._log_verbose("Stored %s records in SQLite.", len(stored))
                 self._log_verbose("Discovery and deduplication took %.2f seconds.", time.perf_counter() - discovery_started)
@@ -282,6 +287,10 @@ class PipelineController:
                         extra_result_fields={"metadata_quality_report": quality_report},
                     )
                 screening_stats = self._screen_papers()
+                screened_papers = self.database.get_papers_for_query(self.config.query_key or "")
+                write_checkpoint(screened_papers, "post_screening", self.config.results_dir,
+                                 extra={"screened_count": screening_stats["screened_count"],
+                                        "full_text_screened_count": screening_stats["full_text_screened_count"]})
                 if self.config.download_pdfs and self.config.pdf_download_mode == "relevant_only":
                     LOGGER.info("Downloading relevant PDFs for screened records.")
                     relevant_pdf_updates = self._download_relevant_pdfs(
