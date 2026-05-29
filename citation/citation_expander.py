@@ -57,8 +57,13 @@ class CitationExpander:
                     self.database.update_citations(seed.database_id, references, citations)
                 for paper in [*backward, *forward]:
                     if paper.identity_key not in seen_identity_keys:
+                        direction = "backward" if paper in backward else "forward"
                         iteration_discovered.append(
-                            paper.model_copy(update={"query_key": self.config.query_key})
+                            paper.model_copy(update={
+                                "query_key": self.config.query_key,
+                                "supplementary_origin": f"snowballing_{direction}_depth{iteration + 1}",
+                                "seed_paper": seed.identity_key,
+                            })
                         )
                         seen_identity_keys.add(paper.identity_key)
 

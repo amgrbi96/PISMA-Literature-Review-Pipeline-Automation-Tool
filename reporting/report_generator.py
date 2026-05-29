@@ -753,6 +753,8 @@ class ReportGenerator:
                 "records_after": stats.get("deduplicated_count"),
                 "title_similarity_threshold": self.config.title_similarity_threshold,
                 "snowballing_added": stats.get("snowballing_added_count", 0),
+                "snowballing_depth": self.config.snowballing_depth,
+                "snowballing_per_direction_limit": self.config.snowballing_per_direction_limit,
             },
         }
         self._write_json_artifact(path, payload)

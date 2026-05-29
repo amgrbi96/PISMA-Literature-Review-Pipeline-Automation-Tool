@@ -96,6 +96,8 @@ class PaperMetadata(BaseModel):
     screening_details: dict[str, Any] = Field(default_factory=dict)
     retrieval_status: str = ""
     retrieval_method: str = ""
+    supplementary_origin: str = ""
+    seed_paper: str = ""
 
     @classmethod
     def validate_title(cls, value: str) -> str:
