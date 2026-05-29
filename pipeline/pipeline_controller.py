@@ -134,6 +134,7 @@ class PipelineController:
         self.citation_expander = CitationExpander(self.config, self.database, citation_provider)
         self.report_generator = ReportGenerator(self.config, self.ai_screener)
         self.search_query_records: list[SourceQueryRecord] = []
+        self.metadata_quality_report: dict[str, Any] | None = None
         if self.config.citation_snowballing_enabled and isinstance(citation_provider, NullCitationProvider):
             LOGGER.info("Citation snowballing is enabled, but no citation-capable API source is active; skipping expansion.")
         if self._requires_local_llm_serial_execution():
@@ -255,6 +256,31 @@ class PipelineController:
                 LOGGER.info("Run mode is collect; AI screening is skipped.")
                 screening_stats = {"screened_count": 0, "full_text_screened_count": 0}
             else:
+                quality_report = self._validate_metadata_quality(current_papers)
+                self.metadata_quality_report = quality_report
+                if quality_report["halt"]:
+                    LOGGER.error(
+                        "Metadata quality gate failed: %s. Halting before screening.",
+                        quality_report["issues"],
+                    )
+                    self._emit_event(
+                        "gate_failed",
+                        gate="metadata_quality",
+                        issues=quality_report["issues"],
+                    )
+                    final_papers = self._normalize_papers_for_current_context(
+                        self.database.get_papers_for_query(self.config.query_key or "")
+                    )
+                    return self._finalize_run_result(
+                        final_papers=final_papers,
+                        discovered_count=len(discovered),
+                        deduplicated_count=len(deduplicated),
+                        snowballing_added_count=len(expanded) if expanded else 0,
+                        screening_stats={"screened_count": 0, "full_text_screened_count": 0},
+                        run_status="failed_metadata_quality_gate",
+                        run_error=f"Metadata quality gate failed: {quality_report['issues']}",
+                        extra_result_fields={"metadata_quality_report": quality_report},
+                    )
                 screening_stats = self._screen_papers()
                 if self.config.download_pdfs and self.config.pdf_download_mode == "relevant_only":
                     LOGGER.info("Downloading relevant PDFs for screened records.")
@@ -426,6 +452,7 @@ class PipelineController:
             "full_text_screened_count": screening_stats["full_text_screened_count"],
             "run_mode": self.config.run_mode,
             "partial_rerun_mode": self.config.partial_rerun_mode,
+            "metadata_quality_report": self.metadata_quality_report,
             "source_query_records": [
                 {
                     "source": rec.source,
@@ -1189,6 +1216,66 @@ class PipelineController:
         """Check whether discovery found enough unique records to justify screening."""
 
         return self.config.min_discovered_records > 0 and discovered_count < self.config.min_discovered_records
+
+    def _validate_metadata_quality(self, papers: list[PaperMetadata]) -> dict[str, Any]:
+        """Check every record for required fields and produce a per-database quality report."""
+
+        issues: list[str] = []
+        per_source: dict[str, dict[str, Any]] = {}
+
+        for paper in papers:
+            source = paper.source or "unknown"
+            if source not in per_source:
+                per_source[source] = {
+                    "total": 0,
+                    "missing_title": 0,
+                    "missing_authors": 0,
+                    "missing_year": 0,
+                    "missing_abstract": 0,
+                    "missing_doi": 0,
+                }
+            stats = per_source[source]
+            stats["total"] += 1
+            if not paper.title.strip():
+                stats["missing_title"] += 1
+            if not paper.authors:
+                stats["missing_authors"] += 1
+            if paper.year is None:
+                stats["missing_year"] += 1
+            if not paper.abstract.strip():
+                stats["missing_abstract"] += 1
+            if not paper.doi:
+                stats["missing_doi"] += 1
+
+        total = len(papers)
+        missing_titles = sum(s["missing_title"] for s in per_source.values())
+        missing_abstracts = sum(s["missing_abstract"] for s in per_source.values())
+        abstract_rate = (total - missing_abstracts) / max(total, 1) * 100
+
+        if missing_titles > 0:
+            issues.append(f"{missing_titles} records missing title (HALT — cannot screen)")
+        if abstract_rate < 80:
+            issues.append(f"Abstract coverage {abstract_rate:.1f}% below 80% threshold (HALT)")
+
+        warnings: list[str] = []
+        missing_authors = sum(s["missing_authors"] for s in per_source.values())
+        missing_years = sum(s["missing_year"] for s in per_source.values())
+        if missing_authors > 0:
+            warnings.append(f"{missing_authors} records missing authors")
+        if missing_years > 0:
+            warnings.append(f"{missing_years} records missing year")
+
+        for warning in warnings:
+            LOGGER.warning("Metadata quality: %s", warning)
+
+        return {
+            "halt": len(issues) > 0,
+            "issues": issues,
+            "warnings": warnings,
+            "total_records": total,
+            "abstract_coverage_pct": round(abstract_rate, 1),
+            "per_source": per_source,
+        }
 
     def _emit_event(self, event_type: str, **payload: Any) -> None:
         """Send a structured event to the UI or any other external observer."""

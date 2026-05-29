@@ -314,6 +314,11 @@ class ReportGenerator:
         mermaid_path = self._write_prisma_flow_mermaid(ranked, shortlisted, excluded, stats or {})
         outputs["prisma_flow_mermaid"] = str(mermaid_path)
 
+        quality_report = stats.get("metadata_quality_report")
+        if quality_report:
+            quality_path = self._write_metadata_quality_json(quality_report)
+            outputs["metadata_quality_json"] = str(quality_path)
+
         return outputs
 
     def _clear_previous_outputs(self) -> None:
@@ -337,6 +342,7 @@ class ReportGenerator:
                 "search_strategy.md",
                 "search_strategy.json",
                 "prisma_flow.mermaid",
+                "metadata_quality.json",
         ):
             path = Path(self.config.results_dir) / filename
             if path.exists():
@@ -525,6 +531,11 @@ class ReportGenerator:
             "",
         ]
         self._write_text_artifact(path, "\n".join(lines))
+        return path
+
+    def _write_metadata_quality_json(self, report: dict[str, Any]) -> Path:
+        path = Path(self.config.results_dir) / "metadata_quality.json"
+        self._write_json_artifact(path, report)
         return path
 
     def _write_decision_database(self, filename: str, table_name: str, papers: list[PaperMetadata]) -> Path:
