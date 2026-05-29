@@ -7,12 +7,44 @@ import logging
 from typing import Any, cast
 
 from config import ResearchConfig
-from models.paper import DecisionLabel, PaperMetadata, ScreeningResult
+from models.paper import DecisionLabel, ExclusionCode, PaperMetadata, ScreeningResult
 from .llm_clients import build_llm_client
 from .relevance_scoring import RelevanceScorer
 from .topic_prefilter import build_topic_matcher
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _ta_from_stage_one(stage_one: str) -> str:
+    """Map a stage_one triage label to the spec's T/A decision."""
+    return stage_one if stage_one in {"include", "exclude"} else "maybe"
+
+
+def _annotate_passes(
+        result: ScreeningResult,
+        *,
+        ta_decision: str | None,
+        ft_decision: str | None,
+) -> ScreeningResult:
+    """Add two-pass screening annotations and compute confidence."""
+
+    score = result.relevance_score or 0
+    criteria_matched = len(result.matched_inclusion_criteria) + len(result.matched_exclusion_criteria)
+    criteria_signal = min(criteria_matched / max(criteria_matched + 1, 1), 1.0) * 15
+    llm_signal = 10 if result.explanation and len(result.explanation) > 50 else 0
+    confidence = min(100.0, max(0.0, abs(score) + criteria_signal + llm_signal))
+
+    update = {
+        "confidence": round(confidence, 1),
+        "ta_decision": cast(DecisionLabel | None, ta_decision),
+        "ta_confidence": round(confidence / 100.0, 3),
+        "ta_exclusion_code": result.exclusion_code if ta_decision == "exclude" else None,
+        "ft_decision": cast(DecisionLabel | None, ft_decision),
+        "ft_confidence": round(confidence / 100.0, 3) if ft_decision else None,
+        "ft_exclusion_code": result.exclusion_code if ft_decision == "exclude" else None,
+        "screening_pass": "ft" if ft_decision else "ta",
+    }
+    return result.model_copy(update=update)
 
 
 def _parse_json_response(text: str) -> dict[str, Any]:
@@ -79,11 +111,16 @@ class AIScreener:
         self.llm_enabled = self.llm_client.enabled
 
     def screen(self, paper: PaperMetadata) -> ScreeningResult:
-        """Screen one paper using hard exclusions, local topic matching, and optional LLM passes."""
+        """Screen one paper using hard exclusions, local topic matching, and optional LLM passes.
+
+        Pass 1 (T/A): screens title + abstract. If excluded, done.
+        Pass 2 (FT): screens with full-text context (if available). Only runs if T/A passed.
+        """
 
         if self.scorer.has_hard_exclusion(paper):
             LOGGER.info("Hard exclusion triggered for '%s'.", paper.title)
-            return self.scorer.deep_score(paper, stage_one_decision="exclude")
+            result = self.scorer.deep_score(paper, stage_one_decision="exclude")
+            return _annotate_passes(result, ta_decision="exclude", ft_decision=None)
 
         topic_match = self.scorer.evaluate_topic_match(paper)
         if topic_match and self.config.log_screening_decisions and self.config.verbosity in {"verbose", "ultra_verbose"}:
@@ -95,23 +132,35 @@ class AIScreener:
                 topic_match.model_name,
             )
         if topic_match and topic_match.should_exclude:
-            return self.scorer.deep_score(paper, stage_one_decision="exclude", topic_match=topic_match)
+            result = self.scorer.deep_score(paper, stage_one_decision="exclude", topic_match=topic_match)
+            return _annotate_passes(result, ta_decision="exclude", ft_decision=None)
+
+        has_full_text = bool(paper.raw_payload.get("full_text_excerpt"))
 
         if not self.llm_enabled:
             LOGGER.debug("LLM screening is disabled for '%s'; falling back to heuristic screening.", paper.title)
             stage_one = self.scorer.quick_screen(paper, topic_match=topic_match)
             if self.config.log_screening_decisions and self.config.verbosity in {"verbose", "ultra_verbose"}:
                 LOGGER.info("Heuristic Stage 1 for '%s': %s", paper.title, stage_one)
-            return self.scorer.deep_score(paper, stage_one_decision=stage_one, topic_match=topic_match)
+            if stage_one == "exclude":
+                result = self.scorer.deep_score(paper, stage_one_decision=stage_one, topic_match=topic_match)
+                return _annotate_passes(result, ta_decision="exclude", ft_decision=None)
+            result = self.scorer.deep_score(paper, stage_one_decision=stage_one, topic_match=topic_match)
+            return _annotate_passes(
+                result,
+                ta_decision=_ta_from_stage_one(stage_one),
+                ft_decision=result.decision if has_full_text else None,
+            )
 
-        LOGGER.debug("Starting LLM Stage 1 for '%s'.", paper.title)
+        LOGGER.debug("Starting LLM Stage 1 (T/A) for '%s'.", paper.title)
         stage_one = self._llm_stage_one(paper) or self.scorer.quick_screen(paper, topic_match=topic_match)
         if self.config.log_screening_decisions and self.config.verbosity in {"verbose", "ultra_verbose"}:
             LOGGER.info("LLM Stage 1 for '%s': %s", paper.title, stage_one)
         if stage_one == "exclude":
-            return self.scorer.deep_score(paper, stage_one_decision=stage_one, topic_match=topic_match)
+            result = self.scorer.deep_score(paper, stage_one_decision=stage_one, topic_match=topic_match)
+            return _annotate_passes(result, ta_decision="exclude", ft_decision=None)
 
-        LOGGER.debug("Starting LLM Stage 2 for '%s' after Stage 1 decision '%s'.", paper.title, stage_one)
+        LOGGER.debug("Starting LLM Stage 2 (FT) for '%s' after Stage 1 decision '%s'.", paper.title, stage_one)
         llm_result = self._llm_stage_two(paper, stage_one)
         if llm_result is not None:
             LOGGER.info(
@@ -120,8 +169,18 @@ class AIScreener:
                 llm_result.decision,
                 llm_result.relevance_score,
             )
-            return _enrich_with_topic_match(llm_result, topic_match)
-        return self.scorer.deep_score(paper, stage_one_decision=stage_one, topic_match=topic_match)
+            result = _enrich_with_topic_match(llm_result, topic_match)
+            return _annotate_passes(
+                result,
+                ta_decision=_ta_from_stage_one(stage_one),
+                ft_decision=result.decision if has_full_text else None,
+            )
+        result = self.scorer.deep_score(paper, stage_one_decision=stage_one, topic_match=topic_match)
+        return _annotate_passes(
+            result,
+            ta_decision=_ta_from_stage_one(stage_one),
+            ft_decision=result.decision if has_full_text else None,
+        )
 
     def summarize_review(self, papers: list[PaperMetadata]) -> str | None:
         """Summarize a shortlist into narrative review text when an LLM is available."""
@@ -184,8 +243,12 @@ class AIScreener:
         prompt = (
             "Assess the paper and return JSON with keys: relevance_score (0-100), explanation, "
             "extracted_passage, methodology_category, domain_category, decision, retain_reason, "
-            "exclusion_reason, matched_inclusion_criteria, matched_exclusion_criteria, matched_banned_topics. "
+            "exclusion_reason, exclusion_code, matched_inclusion_criteria, matched_exclusion_criteria, matched_banned_topics. "
             "Also return matched_excluded_title_terms. "
+            "exclusion_code must be one of: POP_MISMATCH (population outside scope), "
+            "INT_MISMATCH (intervention not relevant), OUT_MISMATCH (outcome not measured), "
+            "DESIGN_MISMATCH (study design ineligible), LANGUAGE, DUPLICATE, FULL_TEXT_UNAVAILABLE, OTHER. "
+            "Set exclusion_code only when decision is exclude.\n"
             "Use the criteria topical match, methodological relevance, theoretical contribution, "
             "recency, citation strength.\n"
             f"{self.config.screening_brief}\n"
@@ -237,6 +300,7 @@ class AIScreener:
                 matched_excluded_title_terms=list(parsed.get("matched_excluded_title_terms", []) or []),
                 retain_reason=str(parsed.get("retain_reason", "")),
                 exclusion_reason=str(parsed.get("exclusion_reason", "")),
+                exclusion_code=cast(ExclusionCode | None, parsed.get("exclusion_code")),
                 screening_context_key=self.config.screening_context_key,
             )
         except Exception as exc:  # noqa: BLE001

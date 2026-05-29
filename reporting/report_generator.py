@@ -52,6 +52,7 @@ def _paper_to_dict(paper: PaperMetadata, pass_names: list[str] | None = None) ->
         "open_access": paper.open_access,
         "relevance_score": paper.relevance_score,
         "relevance_explanation": paper.relevance_explanation,
+        "confidence": paper.screening_details.get("confidence", ""),
         "topic_prefilter_score": paper.screening_details.get("topic_prefilter_score"),
         "topic_prefilter_similarity": paper.screening_details.get("topic_prefilter_similarity"),
         "topic_prefilter_model": paper.screening_details.get("topic_prefilter_model"),
@@ -74,6 +75,18 @@ def _paper_to_dict(paper: PaperMetadata, pass_names: list[str] | None = None) ->
         "inclusion_decision": paper.inclusion_decision,
         "retain_reason": paper.screening_details.get("retain_reason", ""),
         "exclusion_reason": paper.screening_details.get("exclusion_reason", ""),
+        "exclusion_code": paper.screening_details.get("exclusion_code", ""),
+        "ta_decision": paper.screening_details.get("ta_decision", ""),
+        "ta_exclusion_code": paper.screening_details.get("ta_exclusion_code", ""),
+        "ta_confidence": paper.screening_details.get("ta_confidence", ""),
+        "ft_decision": paper.screening_details.get("ft_decision", ""),
+        "ft_exclusion_code": paper.screening_details.get("ft_exclusion_code", ""),
+        "ft_confidence": paper.screening_details.get("ft_confidence", ""),
+        "screening_pass": paper.screening_details.get("screening_pass", ""),
+        "source_database": paper.screening_details.get("source_database", ""),
+        "final_status": paper.screening_details.get("final_status", ""),
+        "exclusion_stage": paper.screening_details.get("exclusion_stage", ""),
+        "ft_retrieval_method": paper.screening_details.get("ft_retrieval_method", ""),
         "matched_inclusion_criteria": json.dumps(
             paper.screening_details.get("matched_inclusion_criteria", []),
             ensure_ascii=False,
@@ -105,6 +118,7 @@ def _paper_to_dict(paper: PaperMetadata, pass_names: list[str] | None = None) ->
                 pass_payload.get("skip_reason")
                 or pass_payload.get("retain_reason")
                 or pass_payload.get("exclusion_reason")
+                or pass_payload.get("exclusion_code")
                 or pass_payload.get("explanation")
                 or ""
         )
@@ -133,6 +147,7 @@ def _paper_to_dict_keys(pass_names: list[str] | None = None) -> list[str]:
         "open_access",
         "relevance_score",
         "relevance_explanation",
+        "confidence",
         "topic_prefilter_score",
         "topic_prefilter_similarity",
         "topic_prefilter_model",
@@ -149,6 +164,18 @@ def _paper_to_dict_keys(pass_names: list[str] | None = None) -> list[str]:
         "inclusion_decision",
         "retain_reason",
         "exclusion_reason",
+        "exclusion_code",
+        "ta_decision",
+        "ta_exclusion_code",
+        "ta_confidence",
+        "ft_decision",
+        "ft_exclusion_code",
+        "ft_confidence",
+        "screening_pass",
+        "source_database",
+        "final_status",
+        "exclusion_stage",
+        "ft_retrieval_method",
         "matched_inclusion_criteria",
         "matched_exclusion_criteria",
         "matched_banned_topics",
@@ -295,6 +322,40 @@ class ReportGenerator:
                 }
             )
 
+        if self.config.output_ris:
+            ris_path = self._write_ris_export(ranked)
+            outputs["ris_export"] = str(ris_path)
+
+        if self.config.output_bibtex:
+            bibtex_path = self._write_bibtex_export(ranked)
+            outputs["bibtex_export"] = str(bibtex_path)
+
+        strategy_md_path = self._write_search_strategy_md(stats or {})
+        strategy_json_path = self._write_search_strategy_json(stats or {})
+        outputs["search_strategy_md"] = str(strategy_md_path)
+        outputs["search_strategy_json"] = str(strategy_json_path)
+
+        mermaid_path = self._write_prisma_flow_mermaid(ranked, shortlisted, excluded, stats or {})
+        outputs["prisma_flow_mermaid"] = str(mermaid_path)
+
+        quality_report = stats.get("metadata_quality_report")
+        if quality_report:
+            quality_path = self._write_metadata_quality_json(quality_report)
+            outputs["metadata_quality_json"] = str(quality_path)
+
+        retrieval_path = self._write_retrieval_log(ranked)
+        outputs["retrieval_log"] = str(retrieval_path)
+
+        verification_data = (stats or {}).get("source_verification")
+        if verification_data:
+            ver_path = self._write_source_verification_json(verification_data)
+            outputs["source_verification_json"] = str(ver_path)
+
+        repro_data = (stats or {}).get("search_reproducibility")
+        if repro_data:
+            repro_path = self._write_search_reproducibility_json(repro_data)
+            outputs["search_reproducibility_json"] = str(repro_path)
+
         return outputs
 
     def _clear_previous_outputs(self) -> None:
@@ -313,6 +374,20 @@ class ReportGenerator:
                 "included_papers.db",
                 "excluded_papers.db",
                 "review_summary.md",
+                "papers.ris",
+                "papers.bib",
+                "search_strategy.md",
+                "search_strategy.json",
+                "prisma_flow.mermaid",
+                "metadata_quality.json",
+                "checkpoint_post_discovery.json",
+                "checkpoint_post_dedup.json",
+                "checkpoint_post_screening.json",
+                "dedup_audit_trail.json",
+                "checkpoint_duplicates.json",
+                "retrieval_log.json",
+                "source_verification.json",
+                "search_reproducibility.json",
         ):
             path = Path(self.config.results_dir) / filename
             if path.exists():
@@ -465,6 +540,80 @@ class ReportGenerator:
         self._write_text_artifact(path, "\n".join(lines))
         return path
 
+    def _write_prisma_flow_mermaid(
+            self,
+            ranked: list[PaperMetadata],
+            included: list[PaperMetadata],
+            excluded: list[PaperMetadata],
+            stats: dict[str, Any],
+    ) -> Path:
+        path = Path(self.config.results_dir) / "prisma_flow.mermaid"
+        decision_counts = stats.get("decision_counts", {})
+        identified = stats.get("discovered_count", len(ranked))
+        after_dedup = stats.get("deduplicated_count", len(ranked))
+        snowballed = stats.get("snowballing_added_count", 0)
+        screened = stats.get("screened_count", len([paper for paper in ranked if paper.inclusion_decision]))
+        n_excluded = len(excluded)
+        n_maybe = decision_counts.get("maybe", 0)
+        n_included = len(included)
+
+        lines = [
+            "flowchart TD",
+            f'    A["Records identified (n={identified})"]',
+            f'    B["After deduplication (n={after_dedup})"]',
+            f'    C["Added via snowballing (n={snowballed})"]',
+            f'    D["Records screened (n={screened})"]',
+            f'    E["Excluded (n={n_excluded})"]',
+            f'    F["Maybe (n={n_maybe})"]',
+            f'    G["Included (n={n_included})"]',
+            "",
+            "    A --> B",
+            "    B --> D",
+            "    C --> D",
+            "    D --> E",
+            "    D --> F",
+            "    D --> G",
+            "",
+        ]
+        self._write_text_artifact(path, "\n".join(lines))
+        return path
+
+    def _write_metadata_quality_json(self, report: dict[str, Any]) -> Path:
+        path = Path(self.config.results_dir) / "metadata_quality.json"
+        self._write_json_artifact(path, report)
+        return path
+
+    def _write_retrieval_log(self, papers: list[PaperMetadata]) -> Path:
+        path = Path(self.config.results_dir) / "retrieval_log.json"
+        entries = []
+        for paper in papers:
+            if paper.retrieval_status or paper.retrieval_method or paper.pdf_link or paper.pdf_path:
+                entries.append({
+                    "title": paper.title,
+                    "doi": paper.doi,
+                    "source": paper.source,
+                    "retrieval_status": paper.retrieval_status or "UNKNOWN",
+                    "retrieval_method": paper.retrieval_method or "",
+                    "pdf_link": paper.pdf_link or "",
+                    "pdf_path": paper.pdf_path or "",
+                    "open_access": paper.open_access,
+                })
+        total = len(papers)
+        retrieved = sum(1 for p in papers if p.retrieval_status == "RETRIEVED")
+        rate = (retrieved / max(total, 1)) * 100
+        payload = {
+            "summary": {
+                "total_papers": total,
+                "retrieved": retrieved,
+                "preprint_only": sum(1 for p in papers if p.retrieval_status == "PREPRINT_ONLY"),
+                "unretrieved": sum(1 for p in papers if p.retrieval_status == "UNRETRIEVED"),
+                "retrieval_rate_pct": round(rate, 1),
+            },
+            "entries": entries,
+        }
+        self._write_json_artifact(path, payload)
+        return path
+
     def _write_decision_database(self, filename: str, table_name: str, papers: list[PaperMetadata]) -> Path:
         path = Path(self.config.results_dir) / filename
         dataframe = _papers_to_dataframe(papers)
@@ -550,6 +699,169 @@ class ReportGenerator:
                 f"- score {paper.relevance_score or 0:.1f}, decision {paper.inclusion_decision or 'unreviewed'}."
             )
         return "\n".join(lines)
+
+    def _write_search_strategy_md(self, stats: dict[str, Any]) -> Path:
+        path = Path(self.config.results_dir) / "search_strategy.md"
+        source_records = stats.get("source_query_records", [])
+        lines = [
+            "# Search Strategy",
+            "",
+            "## Search Parameters",
+            f"- **Research topic**: {self.config.research_topic}",
+            f"- **Keywords**: {', '.join(self.config.search_keywords)}",
+            f"- **Boolean operator**: {self.config.boolean_operators}",
+            f"- **Year range**: {self.config.year_range_start}–{self.config.year_range_end}",
+            f"- **Discovery strategy**: {self.config.discovery_strategy}",
+            f"- **MeSH expansion**: {'enabled' if self.config.effective_mesh_expansion_enabled else 'disabled'}",
+            f"- **Citation snowballing**: depth {self.config.snowballing_depth}, limit {self.config.snowballing_per_direction_limit}/direction",
+            "",
+            "## Query Variants",
+            "",
+        ]
+        for query in self.config.discovery_queries:
+            lines.append(f"- `{query}`")
+        lines.append("")
+        if source_records:
+            lines.append("## Source Results")
+            lines.append("")
+            lines.append("| Source | Started (UTC) | Duration (s) | Results |")
+            lines.append("|--------|---------------|-------------|---------|")
+            for rec in source_records:
+                lines.append(
+                    f"| {rec['source']} | {rec['started_at'][:19]} | {rec['duration_seconds']:.1f} | {rec['results_returned']} |"
+                )
+            lines.append("")
+        lines.append("## Deduplication")
+        lines.append(
+            f"- Records before deduplication: {stats.get('discovered_count', 'N/A')}"
+        )
+        lines.append(
+            f"- Records after deduplication: {stats.get('deduplicated_count', 'N/A')}"
+        )
+        lines.append(
+            f"- Title similarity threshold: {self.config.title_similarity_threshold}"
+        )
+        lines.append(
+            f"- Records added via snowballing: {stats.get('snowballing_added_count', 0)}"
+        )
+        self._write_text_artifact(path, "\n".join(lines))
+        return path
+
+    def _write_search_strategy_json(self, stats: dict[str, Any]) -> Path:
+        path = Path(self.config.results_dir) / "search_strategy.json"
+        payload = {
+            "search_parameters": {
+                "research_topic": self.config.research_topic,
+                "keywords": self.config.search_keywords,
+                "boolean_operator": self.config.boolean_operators,
+                "year_range": [self.config.year_range_start, self.config.year_range_end],
+                "discovery_strategy": self.config.discovery_strategy,
+                "mesh_expansion_enabled": self.config.effective_mesh_expansion_enabled,
+                "snowballing_depth": self.config.snowballing_depth,
+                "snowballing_per_direction_limit": self.config.snowballing_per_direction_limit,
+            },
+            "query_variants": list(self.config.discovery_queries),
+            "source_results": stats.get("source_query_records", []),
+            "deduplication": {
+                "records_before": stats.get("discovered_count"),
+                "records_after": stats.get("deduplicated_count"),
+                "title_similarity_threshold": self.config.title_similarity_threshold,
+                "snowballing_added": stats.get("snowballing_added_count", 0),
+                "snowballing_depth": self.config.snowballing_depth,
+                "snowballing_per_direction_limit": self.config.snowballing_per_direction_limit,
+            },
+        }
+        self._write_json_artifact(path, payload)
+        return path
+
+    def _write_source_verification_json(self, verdicts: list[dict[str, Any]]) -> Path:
+        path = Path(self.config.results_dir) / "source_verification.json"
+        verified = sum(1 for v in verdicts if v.get("verdict") == "VERIFIED")
+        plausible = sum(1 for v in verdicts if v.get("verdict") == "PLAUSIBLE")
+        unverifiable = sum(1 for v in verdicts if v.get("verdict") == "UNVERIFIABLE")
+        fabricated = sum(1 for v in verdicts if v.get("verdict") == "FABRICATED")
+        payload = {
+            "summary": {
+                "total": len(verdicts),
+                "verified": verified,
+                "plausible": plausible,
+                "unverifiable": unverifiable,
+                "fabricated": fabricated,
+            },
+            "verdicts": verdicts,
+        }
+        self._write_json_artifact(path, payload)
+        return path
+
+    def _write_search_reproducibility_json(self, results: list[dict[str, Any]]) -> Path:
+        path = Path(self.config.results_dir) / "search_reproducibility.json"
+        verified = sum(1 for r in results if r.get("classification") == "SEARCH_VERIFIED")
+        approximate = sum(1 for r in results if r.get("classification") == "SEARCH_APPROXIMATE")
+        unverified = sum(1 for r in results if r.get("classification") == "SEARCH_UNVERIFIED")
+        not_checked = sum(1 for r in results if r.get("classification") == "NOT_VERIFIED")
+        payload = {
+            "summary": {
+                "total_sources": len(results),
+                "verified": verified,
+                "approximate": approximate,
+                "unverified": unverified,
+                "not_checked": not_checked,
+            },
+            "results": results,
+        }
+        self._write_json_artifact(path, payload)
+        return path
+        path = Path(self.config.results_dir) / filename
+        entries: list[str] = []
+        for paper in papers:
+            lines = ["TY  - JOUR"]
+            if paper.title:
+                lines.append(f"TI  - {paper.title}")
+            for author in paper.authors or []:
+                lines.append(f"AU  - {author}")
+            if paper.year:
+                lines.append(f"PY  - {paper.year}")
+            if paper.venue:
+                lines.append(f"JO  - {paper.venue}")
+            if paper.doi:
+                lines.append(f"DO  - {paper.doi}")
+            if paper.abstract:
+                lines.append(f"AB  - {paper.abstract}")
+            if paper.external_ids and paper.external_ids.get("pubmed"):
+                lines.append(f"ID  - PMID:{paper.external_ids['pubmed']}")
+            lines.append("ER  - ")
+            entries.append("\n".join(lines))
+        self._write_text_artifact(path, "\n\n".join(entries))
+        return path
+
+    def _write_bibtex_export(self, papers: list[PaperMetadata], filename: str = "papers.bib") -> Path:
+        path = Path(self.config.results_dir) / filename
+        entries: list[str] = []
+        for paper in papers:
+            cite_key = self._bibtex_cite_key(paper)
+            lines = [f"@article{{{cite_key},"]
+            if paper.title:
+                lines.append(f"  title = {{{paper.title}}},")
+            if paper.authors:
+                lines.append(f"  author = {{{' and '.join(paper.authors)}}},")
+            if paper.year:
+                lines.append(f"  year = {{{paper.year}}},")
+            if paper.venue:
+                lines.append(f"  journal = {{{paper.venue}}},")
+            if paper.doi:
+                lines.append(f"  doi = {{{paper.doi}}},")
+            if paper.abstract:
+                lines.append(f"  abstract = {{{paper.abstract}}},")
+            lines.append("}")
+            entries.append("\n".join(lines))
+        self._write_text_artifact(path, "\n\n".join(entries))
+        return path
+
+    def _bibtex_cite_key(self, paper: PaperMetadata) -> str:
+        first_author = paper.authors[0].split()[-1].lower() if paper.authors else "unknown"
+        year = paper.year or "nd"
+        title_word = paper.title.split()[0].lower() if paper.title else "untitled"
+        return f"{first_author}{year}{title_word}"
 
     def _final_threshold(self) -> float:
         resolved_passes = self.config.resolved_analysis_passes

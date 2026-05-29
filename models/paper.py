@@ -10,6 +10,17 @@ from utils.text_processing import canonical_doi, normalize_title
 
 DecisionLabel = Literal["include", "maybe", "exclude"]
 
+ExclusionCode = Literal[
+    "POP_MISMATCH",
+    "INT_MISMATCH",
+    "OUT_MISMATCH",
+    "DESIGN_MISMATCH",
+    "LANGUAGE",
+    "DUPLICATE",
+    "FULL_TEXT_UNAVAILABLE",
+    "OTHER",
+]
+
 
 class ScreeningResult(BaseModel):
     """Structured outcome returned by the heuristic or LLM-assisted screening step."""
@@ -41,7 +52,16 @@ class ScreeningResult(BaseModel):
     matched_excluded_title_terms: list[str] = Field(default_factory=list)
     retain_reason: str = ""
     exclusion_reason: str = ""
+    exclusion_code: ExclusionCode | None = None
+    confidence: float = 0.0
     screening_context_key: str | None = None
+    ta_decision: DecisionLabel | None = None
+    ta_exclusion_code: ExclusionCode | None = None
+    ta_confidence: float | None = None
+    ft_decision: DecisionLabel | None = None
+    ft_exclusion_code: ExclusionCode | None = None
+    ft_confidence: float | None = None
+    screening_pass: str = "ta"
 
 
 class PaperMetadata(BaseModel):
@@ -74,6 +94,10 @@ class PaperMetadata(BaseModel):
     external_ids: dict[str, str] = Field(default_factory=dict)
     raw_payload: dict[str, Any] = Field(default_factory=dict)
     screening_details: dict[str, Any] = Field(default_factory=dict)
+    retrieval_status: str = ""
+    retrieval_method: str = ""
+    supplementary_origin: str = ""
+    seed_paper: str = ""
 
     @classmethod
     def validate_title(cls, value: str) -> str:

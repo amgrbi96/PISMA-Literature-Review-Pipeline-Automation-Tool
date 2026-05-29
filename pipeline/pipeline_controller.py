@@ -7,6 +7,8 @@ import logging
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import Event
 from typing import Any
@@ -33,11 +35,28 @@ from discovery.semantic_scholar_client import SemanticScholarClient
 from discovery.springer_client import SpringerClient
 from models.paper import PaperMetadata, ScreeningResult
 from reporting.report_generator import ReportGenerator
-from utils.deduplication import deduplicate_papers
+from pipeline.gate_checker import GateChecker, GateCondition
+from utils.deduplication import deduplicate_papers, deduplicate_papers_with_trail
 from utils.http import configure_http_logging, configure_http_runtime
 from utils.text_processing import stable_hash
+from utils.checkpoints import write_checkpoint
+from utils.deduplication import DeduplicationResult
+from utils.source_verification import verify_sources
+from utils.search_reproducibility import verify_search_reproducibility
 
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class SourceQueryRecord:
+    """Per-source metadata captured during the discovery phase."""
+
+    source: str
+    started_at: str = ""
+    finished_at: str = ""
+    duration_seconds: float = 0.0
+    results_returned: int = 0
+    query_variants: list[str] = field(default_factory=list)
 
 
 class PipelineStoppedError(RuntimeError):
@@ -119,6 +138,11 @@ class PipelineController:
         citation_provider = self.fixture_client or (self.openalex_client if self.config.openalex_enabled else NullCitationProvider())
         self.citation_expander = CitationExpander(self.config, self.database, citation_provider)
         self.report_generator = ReportGenerator(self.config, self.ai_screener)
+        self.search_query_records: list[SourceQueryRecord] = []
+        self.metadata_quality_report: dict[str, Any] | None = None
+        self.verification_verdicts: list[Any] = []
+        self.search_reproducibility_results: list[Any] = []
+        self.gate_checker = GateChecker()
         if self.config.citation_snowballing_enabled and isinstance(citation_provider, NullCitationProvider):
             LOGGER.info("Citation snowballing is enabled, but no citation-capable API source is active; skipping expansion.")
         if self._requires_local_llm_serial_execution():
@@ -173,12 +197,23 @@ class PipelineController:
                 discovered = self._discover()
                 self._emit_event("stage_finished", stage="discovery", record_count=len(discovered))
                 LOGGER.info("Discovery completed with %s records.", len(discovered))
-                deduplicated = deduplicate_papers(
+                write_checkpoint(discovered, "post_discovery", self.config.results_dir,
+                                 extra={"source_query_records": [r.__dict__ for r in self.search_query_records]})
+                if self.search_query_records:
+                    self.search_reproducibility_results = verify_search_reproducibility(
+                        [r.__dict__ for r in self.search_query_records],
+                        self.config,
+                    )
+                dedup_result = deduplicate_papers_with_trail(
                     discovered,
                     title_similarity_threshold=self.config.title_similarity_threshold,
                 )
-                deduplicated = self._apply_discovery_limits(deduplicated)
-                LOGGER.info("Deduplication completed with %s unique records.", len(deduplicated))
+                deduplicated = self._apply_discovery_limits(dedup_result.unique)
+                LOGGER.info("Deduplication completed with %s unique records (%s duplicates).", len(deduplicated), len(dedup_result.duplicates))
+                write_checkpoint(deduplicated, "post_dedup", self.config.results_dir,
+                                 extra={"discovered_count": len(discovered), "deduplicated_count": len(deduplicated),
+                                         "duplicate_count": len(dedup_result.duplicates)})
+                self._write_dedup_audit_trail(dedup_result)
                 stored = self.database.upsert_papers(deduplicated, self.config.query_key or "")
                 self._log_verbose("Stored %s records in SQLite.", len(stored))
                 self._log_verbose("Discovery and deduplication took %.2f seconds.", time.perf_counter() - discovery_started)
@@ -240,7 +275,61 @@ class PipelineController:
                 LOGGER.info("Run mode is collect; AI screening is skipped.")
                 screening_stats = {"screened_count": 0, "full_text_screened_count": 0}
             else:
+                quality_report = self._validate_metadata_quality(current_papers)
+                self.metadata_quality_report = quality_report
+
+                self.gate_checker.register("pre_screening", [
+                    GateCondition(
+                        name="metadata_quality",
+                        check=lambda: (
+                            not quality_report["halt"],
+                            f"Metadata quality issues: {quality_report['issues']}" if quality_report["halt"] else "OK",
+                        ),
+                        remediation="Fix metadata issues: ensure all records have titles and abstract coverage ≥80%.",
+                    ),
+                    GateCondition(
+                        name="papers_available",
+                        check=lambda: (
+                            len(current_papers) > 0,
+                            f"No papers available for screening ({len(current_papers)} papers)",
+                        ),
+                        remediation="Check discovery configuration and ensure sources are returning results.",
+                    ),
+                ])
+                gate_result = self.gate_checker.evaluate("pre_screening")
+                if not gate_result.passed:
+                    LOGGER.error(
+                        "Gate 'pre_screening' FAILED — %s conditions unchecked.",
+                        len(gate_result.failures),
+                    )
+                    self._emit_event(
+                        "gate_failed",
+                        gate="pre_screening",
+                        failures=[f["name"] for f in gate_result.failures],
+                    )
+                    final_papers = self._normalize_papers_for_current_context(
+                        self.database.get_papers_for_query(self.config.query_key or "")
+                    )
+                    return self._finalize_run_result(
+                        final_papers=final_papers,
+                        discovered_count=len(discovered),
+                        deduplicated_count=len(deduplicated),
+                        snowballing_added_count=len(expanded) if expanded else 0,
+                        screening_stats={"screened_count": 0, "full_text_screened_count": 0},
+                        run_status="failed_gate_pre_screening",
+                        run_error=f"Gate 'pre_screening' failed: {[f['name'] for f in gate_result.failures]}",
+                    )
                 screening_stats = self._screen_papers()
+                screened_papers = self.database.get_papers_for_query(self.config.query_key or "")
+                write_checkpoint(screened_papers, "post_screening", self.config.results_dir,
+                                 extra={"screened_count": screening_stats["screened_count"],
+                                        "full_text_screened_count": screening_stats["full_text_screened_count"]})
+                verified, verification_verdicts = verify_sources(screened_papers, self.config)
+                self.verification_verdicts = verification_verdicts
+                if len(verified) < len(screened_papers):
+                    removed = len(screened_papers) - len(verified)
+                    LOGGER.warning("Source verification removed %s papers.", removed)
+                    self._emit_event("source_verification", removed=removed, total=len(screened_papers))
                 if self.config.download_pdfs and self.config.pdf_download_mode == "relevant_only":
                     LOGGER.info("Downloading relevant PDFs for screened records.")
                     relevant_pdf_updates = self._download_relevant_pdfs(
@@ -254,6 +343,13 @@ class PipelineController:
                 self._normalize_papers_for_current_context(
                     self.database.get_papers_for_query(self.config.query_key or "")
                 )
+            )
+            self._verify_count_consistency(
+                discovered_count=len(discovered),
+                deduplicated_count=len(deduplicated),
+                snowballing_count=len(expanded) if expanded else 0,
+                screened_count=screening_stats["screened_count"],
+                final_count=len(final_papers),
             )
             self._log_verbose("Pipeline finished in %.2f seconds.", time.perf_counter() - pipeline_started)
             return self._finalize_run_result(
@@ -370,6 +466,7 @@ class PipelineController:
             deduplicated_count=deduplicated_count,
             snowballing_added_count=snowballing_added_count,
             screening_stats=screening_stats,
+            source_query_records=self.search_query_records,
         )
         report_paths = self.report_generator.generate(final_papers, stats=stats)
         self._log_verbose("Generated %s report artifacts.", len(report_paths))
@@ -396,6 +493,7 @@ class PipelineController:
             deduplicated_count: int,
             snowballing_added_count: int,
             screening_stats: dict[str, int],
+            source_query_records: list[SourceQueryRecord] | None = None,
     ) -> dict[str, Any]:
         """Build the shared reporting stats payload used by full and partial runs."""
 
@@ -409,6 +507,40 @@ class PipelineController:
             "full_text_screened_count": screening_stats["full_text_screened_count"],
             "run_mode": self.config.run_mode,
             "partial_rerun_mode": self.config.partial_rerun_mode,
+            "metadata_quality_report": self.metadata_quality_report,
+            "gate_summary": self.gate_checker.summary(),
+            "source_verification": [
+                {
+                    "paper_identity": v.paper_identity,
+                    "tier": v.tier,
+                    "method": v.method,
+                    "verdict": v.verdict,
+                    "detail": v.detail,
+                }
+                for v in self.verification_verdicts
+            ],
+            "search_reproducibility": [
+                {
+                    "source": r.source,
+                    "original_count": r.original_count,
+                    "verification_count": r.verification_count,
+                    "discrepancy_pct": r.discrepancy_pct,
+                    "classification": r.classification,
+                    "detail": r.detail,
+                }
+                for r in self.search_reproducibility_results
+            ],
+            "source_query_records": [
+                {
+                    "source": rec.source,
+                    "started_at": rec.started_at,
+                    "finished_at": rec.finished_at,
+                    "duration_seconds": rec.duration_seconds,
+                    "results_returned": rec.results_returned,
+                    "query_variants": rec.query_variants,
+                }
+                for rec in (source_query_records or [])
+            ],
         }
 
     def _discover(self) -> list[PaperMetadata]:
@@ -821,6 +953,19 @@ class PipelineController:
             "screening_context_key": self.config.screening_context_key,
             "final_pass": final_pass_name,
             "passes": passes,
+            "source_database": paper.source,
+            "ta_criteria_matched": final_result.matched_inclusion_criteria,
+            "ft_retrieval_method": paper.retrieval_method,
+            "final_status": (
+                "INCLUDED" if final_result.decision == "include" else
+                "EXCLUDED" if final_result.decision == "exclude" else
+                "UNCERTAIN"
+            ),
+            "exclusion_stage": (
+                "TA" if final_result.ta_decision == "exclude" and not final_result.ft_decision
+                else "FT" if final_result.ft_decision == "exclude"
+                else ""
+            ),
         }
         return final_result, screening_details
 
@@ -853,13 +998,26 @@ class PipelineController:
             source_name: str,
             search_callable: Callable[[], list[PaperMetadata]],
     ) -> list[PaperMetadata]:
-        """Run one discovery client and emit source-level progress events."""
+        """Run one discovery client, record query metadata, and emit source-level progress events."""
 
         self._log_verbose("Querying %s.", source_name)
         self._emit_event("source_requested", source=source_name)
+        started_at = datetime.now(tz=timezone.utc).isoformat()
         source_started = time.perf_counter()
         records = search_callable()
-        self._log_verbose("%s returned %s records in %.2f seconds.", source_name, len(records), time.perf_counter() - source_started)
+        duration = time.perf_counter() - source_started
+        finished_at = datetime.now(tz=timezone.utc).isoformat()
+        self._log_verbose("%s returned %s records in %.2f seconds.", source_name, len(records), duration)
+        self.search_query_records.append(
+            SourceQueryRecord(
+                source=source_name,
+                started_at=started_at,
+                finished_at=finished_at,
+                duration_seconds=round(duration, 3),
+                results_returned=len(records),
+                query_variants=list(self.config.discovery_queries),
+            )
+        )
         return records
 
     def _config_for_analysis_pass(self, analysis_pass: AnalysisPassConfig) -> ResearchConfig:
@@ -1148,6 +1306,152 @@ class PipelineController:
         """Check whether discovery found enough unique records to justify screening."""
 
         return self.config.min_discovered_records > 0 and discovered_count < self.config.min_discovered_records
+
+    def _write_dedup_audit_trail(self, result: DeduplicationResult) -> None:
+        """Persist the deduplication audit trail and separated duplicates."""
+
+        import json
+        results_dir = Path(self.config.results_dir)
+        results_dir.mkdir(parents=True, exist_ok=True)
+
+        audit_path = results_dir / "dedup_audit_trail.json"
+        audit_payload = [
+            {
+                "kept_id": entry.kept_id,
+                "removed_id": entry.removed_id,
+                "kept_source": entry.kept_source,
+                "removed_source": entry.removed_source,
+                "method": entry.method,
+                "similarity": entry.similarity,
+                "reason": entry.reason,
+            }
+            for entry in result.audit_trail
+        ]
+        audit_path.write_text(json.dumps(audit_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        LOGGER.info("Dedup audit trail written: %s entries.", len(result.audit_trail))
+
+        if result.duplicates:
+            write_checkpoint(result.duplicates, "duplicates", self.config.results_dir)
+            LOGGER.info("Separated %s duplicate records preserved.", len(result.duplicates))
+
+    def _verify_count_consistency(
+            self,
+            *,
+            discovered_count: int,
+            deduplicated_count: int,
+            snowballing_count: int,
+            screened_count: int,
+            final_count: int,
+    ) -> None:
+        """Check cross-component count consistency and warn on discrepancies."""
+
+        checks: list[tuple[str, bool, str]] = []
+
+        checks.append((
+            "discovered >= deduplicated",
+            discovered_count >= deduplicated_count,
+            f"discovered ({discovered_count}) < deduplicated ({deduplicated_count})",
+        ))
+        checks.append((
+            "screened <= deduplicated + snowballed",
+            screened_count <= deduplicated_count + snowballing_count,
+            f"screened ({screened_count}) > deduplicated ({deduplicated_count}) + snowballed ({snowballing_count})",
+        ))
+        checks.append((
+            "final <= deduplicated + snowballed",
+            final_count <= deduplicated_count + snowballing_count,
+            f"final ({final_count}) > deduplicated ({deduplicated_count}) + snowballed ({snowballing_count})",
+        ))
+
+        for name, passed, message in checks:
+            if not passed:
+                LOGGER.warning("Count consistency issue: %s — %s", name, message)
+                self._emit_event("count_inconsistency", check=name, message=message)
+        """Persist the deduplication audit trail and separated duplicates."""
+
+        import json
+        results_dir = Path(self.config.results_dir)
+        results_dir.mkdir(parents=True, exist_ok=True)
+
+        audit_path = results_dir / "dedup_audit_trail.json"
+        audit_payload = [
+            {
+                "kept_id": entry.kept_id,
+                "removed_id": entry.removed_id,
+                "kept_source": entry.kept_source,
+                "removed_source": entry.removed_source,
+                "method": entry.method,
+                "similarity": entry.similarity,
+                "reason": entry.reason,
+            }
+            for entry in result.audit_trail
+        ]
+        audit_path.write_text(json.dumps(audit_payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        LOGGER.info("Dedup audit trail written: %s entries.", len(result.audit_trail))
+
+        if result.duplicates:
+            write_checkpoint(result.duplicates, "duplicates", self.config.results_dir)
+            LOGGER.info("Separated %s duplicate records preserved.", len(result.duplicates))
+
+    def _validate_metadata_quality(self, papers: list[PaperMetadata]) -> dict[str, Any]:
+        """Check every record for required fields and produce a per-database quality report."""
+
+        issues: list[str] = []
+        per_source: dict[str, dict[str, Any]] = {}
+
+        for paper in papers:
+            source = paper.source or "unknown"
+            if source not in per_source:
+                per_source[source] = {
+                    "total": 0,
+                    "missing_title": 0,
+                    "missing_authors": 0,
+                    "missing_year": 0,
+                    "missing_abstract": 0,
+                    "missing_doi": 0,
+                }
+            stats = per_source[source]
+            stats["total"] += 1
+            if not paper.title.strip():
+                stats["missing_title"] += 1
+            if not paper.authors:
+                stats["missing_authors"] += 1
+            if paper.year is None:
+                stats["missing_year"] += 1
+            if not paper.abstract.strip():
+                stats["missing_abstract"] += 1
+            if not paper.doi:
+                stats["missing_doi"] += 1
+
+        total = len(papers)
+        missing_titles = sum(s["missing_title"] for s in per_source.values())
+        missing_abstracts = sum(s["missing_abstract"] for s in per_source.values())
+        abstract_rate = (total - missing_abstracts) / max(total, 1) * 100
+
+        if missing_titles > 0:
+            issues.append(f"{missing_titles} records missing title (HALT — cannot screen)")
+        if abstract_rate < 80:
+            issues.append(f"Abstract coverage {abstract_rate:.1f}% below 80% threshold (HALT)")
+
+        warnings: list[str] = []
+        missing_authors = sum(s["missing_authors"] for s in per_source.values())
+        missing_years = sum(s["missing_year"] for s in per_source.values())
+        if missing_authors > 0:
+            warnings.append(f"{missing_authors} records missing authors")
+        if missing_years > 0:
+            warnings.append(f"{missing_years} records missing year")
+
+        for warning in warnings:
+            LOGGER.warning("Metadata quality: %s", warning)
+
+        return {
+            "halt": len(issues) > 0,
+            "issues": issues,
+            "warnings": warnings,
+            "total_records": total,
+            "abstract_coverage_pct": round(abstract_rate, 1),
+            "per_source": per_source,
+        }
 
     def _emit_event(self, event_type: str, **payload: Any) -> None:
         """Send a structured event to the UI or any other external observer."""

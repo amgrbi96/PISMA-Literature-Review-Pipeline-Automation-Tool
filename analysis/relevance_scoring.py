@@ -7,7 +7,7 @@ from typing import cast
 
 from analysis.topic_prefilter import BaseTopicMatcher, TopicMatchResult
 from config import ResearchConfig
-from models.paper import DecisionLabel, PaperMetadata, ScreeningResult
+from models.paper import DecisionLabel, ExclusionCode, PaperMetadata, ScreeningResult
 from utils.text_processing import extract_salient_sentence, keyword_overlap_score, normalize_title
 
 METHODOLOGY_PATTERNS = {
@@ -180,28 +180,34 @@ class RelevanceScorer:
             else ""
         )
         exclusion_reason = ""
+        exclusion_code: ExclusionCode | None = None
         if decision == "exclude":
             if matched_banned:
                 exclusion_reason = f"Excluded because banned topics were detected: {', '.join(matched_banned)}."
+                exclusion_code = "OTHER"
             elif matched_excluded_title_terms:
                 exclusion_reason = (
                     "Excluded because title markers indicate a non-target publication type: "
                     f"{', '.join(matched_excluded_title_terms)}."
                 )
+                exclusion_code = "DESIGN_MISMATCH"
             elif topic_match and topic_match.should_exclude:
                 exclusion_reason = (
                     f"Excluded because the local topic prefilter classified the paper as {topic_match.classification} "
                     f"with similarity {topic_match.similarity:.2f} ({topic_match.score:.1f}/100) using {topic_match.model_name}."
                 )
+                exclusion_code = "OUT_MISMATCH"
             elif matched_exclusion:
                 exclusion_reason = (
                     f"Excluded because exclusion criteria matched: {', '.join(matched_exclusion)}."
                 )
+                exclusion_code = "INT_MISMATCH"
             else:
                 exclusion_reason = (
                     f"Excluded because the score {relevance_score:.1f} was below the "
                     f"{self.config.relevance_threshold:.1f} threshold."
                 )
+                exclusion_code = "OTHER"
 
         explanation = (
             f"Topic match {topic_score:.1f}/100, keyword topic score {keyword_topic_score:.1f}/100, "
@@ -245,6 +251,7 @@ class RelevanceScorer:
             matched_excluded_title_terms=matched_excluded_title_terms,
             retain_reason=retain_reason,
             exclusion_reason=exclusion_reason,
+            exclusion_code=exclusion_code,
             screening_context_key=self.config.screening_context_key,
             evaluation_breakdown={
                 "topical_match": round(topic_score, 2),

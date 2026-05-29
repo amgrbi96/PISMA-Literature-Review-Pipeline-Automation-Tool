@@ -201,6 +201,9 @@ class ResearchConfig(BaseModel):
     ai_evaluation_enabled: bool = True
     skip_discovery: bool = False
     citation_snowballing_enabled: bool = True
+    mesh_expansion_enabled: bool | None = None
+    snowballing_depth: int = 1
+    snowballing_per_direction_limit: int = 10
     relevance_threshold: float = 70.0
     download_pdfs: bool = False
     pdf_download_mode: Literal["all", "relevant_only"] = "all"
@@ -209,12 +212,18 @@ class ResearchConfig(BaseModel):
     llm_provider: Literal["auto", "heuristic", "openai_compatible", "gemini", "ollama", "huggingface_local"] = "auto"
     decision_mode: Literal["strict", "triage"] = "strict"
     maybe_threshold_margin: float = 10.0
+    screening_confidence_threshold: float = 80.0
+    rob_confidence_threshold: float = 80.0
+    extraction_confidence_threshold: float = 85.0
+    grade_confidence_threshold: float = 75.0
     run_mode: Literal["collect", "analyze"] = "analyze"
     verbosity: Literal["normal", "verbose", "ultra_verbose"] = "ultra_verbose"
     output_csv: bool = True
     output_json: bool = True
     output_markdown: bool = True
     output_sqlite_exports: bool = True
+    output_ris: bool = True
+    output_bibtex: bool = True
     ui_settings_mode: Literal["compact", "advanced"] = "compact"
     ui_show_advanced_settings: bool = False
     analysis_passes: list[AnalysisPassConfig] = Field(default_factory=list)
@@ -651,6 +660,10 @@ class ResearchConfig(BaseModel):
 
         return self.screening_workers or self.max_workers
 
+    @property
+    def effective_mesh_expansion_enabled(self) -> bool:
+        return self.mesh_expansion_enabled if self.mesh_expansion_enabled is not None else bool(self.include_pubmed)
+
     def finalize(self) -> "ResearchConfig":
         """Resolve derived values and ensure the configured output directories exist."""
 
@@ -983,6 +996,21 @@ class ResearchConfig(BaseModel):
                 0,
             ),
             citation_snowballing_enabled=citation_snowballing,
+            mesh_expansion_enabled=value_for(
+                "mesh_expansion_enabled",
+                getattr(args, "mesh_expansion_enabled", None),
+                None,
+            ),
+            snowballing_depth=value_for(
+                "snowballing_depth",
+                getattr(args, "snowballing_depth", None),
+                1,
+            ),
+            snowballing_per_direction_limit=value_for(
+                "snowballing_per_direction_limit",
+                getattr(args, "snowballing_per_direction_limit", None),
+                10,
+            ),
             relevance_threshold=relevance_threshold,
             download_pdfs=download_pdfs,
             pdf_download_mode=value_for("pdf_download_mode", getattr(args, "pdf_download_mode", None), "all"),
@@ -994,6 +1022,26 @@ class ResearchConfig(BaseModel):
                 "maybe_threshold_margin",
                 getattr(args, "maybe_threshold_margin", None),
                 10.0,
+            ),
+            screening_confidence_threshold=value_for(
+                "screening_confidence_threshold",
+                getattr(args, "screening_confidence_threshold", None),
+                80.0,
+            ),
+            rob_confidence_threshold=value_for(
+                "rob_confidence_threshold",
+                getattr(args, "rob_confidence_threshold", None),
+                80.0,
+            ),
+            extraction_confidence_threshold=value_for(
+                "extraction_confidence_threshold",
+                getattr(args, "extraction_confidence_threshold", None),
+                85.0,
+            ),
+            grade_confidence_threshold=value_for(
+                "grade_confidence_threshold",
+                getattr(args, "grade_confidence_threshold", None),
+                75.0,
             ),
             run_mode=run_mode,
             verbosity=verbosity,
@@ -1008,6 +1056,16 @@ class ResearchConfig(BaseModel):
             output_sqlite_exports=value_for(
                 "output_sqlite_exports",
                 getattr(args, "output_sqlite_exports", None),
+                True,
+            ),
+            output_ris=value_for(
+                "output_ris",
+                getattr(args, "output_ris", None),
+                True,
+            ),
+            output_bibtex=value_for(
+                "output_bibtex",
+                getattr(args, "output_bibtex", None),
                 True,
             ),
             ui_settings_mode=value_for("ui_settings_mode", getattr(args, "ui_settings_mode", None), "compact"),
@@ -1252,6 +1310,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         dest="citation_snowballing_enabled",
         help="Enable or disable backward and forward citation expansion",
+    )
+    parser.add_argument(
+        "--mesh-expansion-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable automatic MeSH term expansion for PubMed queries",
+    )
+    parser.add_argument(
+        "--snowballing-depth",
+        type=int,
+        dest="snowballing_depth",
+        help="Number of citation expansion iterations (default 1)",
+    )
+    parser.add_argument(
+        "--snowballing-per-direction-limit",
+        type=int,
+        dest="snowballing_per_direction_limit",
+        help="Maximum papers to fetch per direction per seed per iteration (default 10)",
     )
     parser.add_argument(
         "--download-pdfs",
@@ -1552,6 +1628,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         dest="maybe_threshold_margin",
         help="Score margin below threshold that still counts as maybe in triage mode",
     )
+    parser.add_argument("--screening-confidence-threshold", type=float, help="Confidence threshold for screening decisions (default: 80)")
+    parser.add_argument("--rob-confidence-threshold", type=float, help="Confidence threshold for risk-of-bias judgments (default: 80)")
+    parser.add_argument("--extraction-confidence-threshold", type=float, help="Confidence threshold for data extraction (default: 85)")
+    parser.add_argument("--grade-confidence-threshold", type=float, help="Confidence threshold for GRADE ratings (default: 75)")
     parser.add_argument(
         "--full-text-max-chars",
         type=int,
@@ -1732,6 +1812,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Write SQLite decision export databases",
+    )
+    parser.add_argument(
+        "--output-ris",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Write RIS export for import into Covidence, Rayyan, or Zotero",
+    )
+    parser.add_argument(
+        "--output-bibtex",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Write BibTeX export for import into Zotero, Mendeley, or LaTeX bibliographies",
     )
     return parser
 

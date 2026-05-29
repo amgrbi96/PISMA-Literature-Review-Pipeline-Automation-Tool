@@ -51,14 +51,31 @@ class PDFFetcher:
 
         pdf_path = paper.pdf_path
         should_download = self.config.download_pdfs if download is None else download
+        retrieval_method = ""
+        if paper.doi and self.config.api_settings.unpaywall_email:
+            retrieval_method = "open_access"
         if should_download and pdf_link:
             pdf_path = self.download_pdf(paper, pdf_link, target_dir=target_dir)
+            if pdf_path:
+                retrieval_method = retrieval_method or "direct_download"
+
+        if paper.retrieval_status and paper.retrieval_method:
+            retrieval_method = paper.retrieval_method
+
+        if paper.pdf_path and not retrieval_method:
+            retrieval_method = "previously_retrieved"
 
         return paper.model_copy(
             update={
                 "pdf_link": pdf_link,
                 "pdf_path": pdf_path,
                 "open_access": open_access,
+                "retrieval_method": retrieval_method,
+                "retrieval_status": (
+                    "RETRIEVED" if pdf_path else
+                    ("PREPRINT_ONLY" if pdf_link and not pdf_path else
+                     ("UNRETRIEVED" if should_download and not pdf_link else paper.retrieval_status or ""))
+                ),
             }
         )
 
