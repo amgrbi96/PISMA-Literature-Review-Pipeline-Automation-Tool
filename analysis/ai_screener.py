@@ -15,6 +15,32 @@ from .topic_prefilter import build_topic_matcher
 LOGGER = logging.getLogger(__name__)
 
 
+def _ta_from_stage_one(stage_one: str) -> str:
+    """Map a stage_one triage label to the spec's T/A decision."""
+    return stage_one if stage_one in {"include", "exclude"} else "maybe"
+
+
+def _annotate_passes(
+        result: ScreeningResult,
+        *,
+        ta_decision: str | None,
+        ft_decision: str | None,
+) -> ScreeningResult:
+    """Add two-pass screening annotations to a ScreeningResult."""
+
+    confidence = abs(result.relevance_score or 0) / 100.0
+    update = {
+        "ta_decision": cast(DecisionLabel | None, ta_decision),
+        "ta_confidence": round(confidence, 3),
+        "ta_exclusion_code": result.exclusion_code if ta_decision == "exclude" else None,
+        "ft_decision": cast(DecisionLabel | None, ft_decision),
+        "ft_confidence": round(confidence, 3) if ft_decision else None,
+        "ft_exclusion_code": result.exclusion_code if ft_decision == "exclude" else None,
+        "screening_pass": "ft" if ft_decision else "ta",
+    }
+    return result.model_copy(update=update)
+
+
 def _parse_json_response(text: str) -> dict[str, Any]:
     """Extract a JSON object from a raw LLM response, including fenced code blocks."""
 
@@ -79,11 +105,16 @@ class AIScreener:
         self.llm_enabled = self.llm_client.enabled
 
     def screen(self, paper: PaperMetadata) -> ScreeningResult:
-        """Screen one paper using hard exclusions, local topic matching, and optional LLM passes."""
+        """Screen one paper using hard exclusions, local topic matching, and optional LLM passes.
+
+        Pass 1 (T/A): screens title + abstract. If excluded, done.
+        Pass 2 (FT): screens with full-text context (if available). Only runs if T/A passed.
+        """
 
         if self.scorer.has_hard_exclusion(paper):
             LOGGER.info("Hard exclusion triggered for '%s'.", paper.title)
-            return self.scorer.deep_score(paper, stage_one_decision="exclude")
+            result = self.scorer.deep_score(paper, stage_one_decision="exclude")
+            return _annotate_passes(result, ta_decision="exclude", ft_decision=None)
 
         topic_match = self.scorer.evaluate_topic_match(paper)
         if topic_match and self.config.log_screening_decisions and self.config.verbosity in {"verbose", "ultra_verbose"}:
@@ -95,23 +126,35 @@ class AIScreener:
                 topic_match.model_name,
             )
         if topic_match and topic_match.should_exclude:
-            return self.scorer.deep_score(paper, stage_one_decision="exclude", topic_match=topic_match)
+            result = self.scorer.deep_score(paper, stage_one_decision="exclude", topic_match=topic_match)
+            return _annotate_passes(result, ta_decision="exclude", ft_decision=None)
+
+        has_full_text = bool(paper.raw_payload.get("full_text_excerpt"))
 
         if not self.llm_enabled:
             LOGGER.debug("LLM screening is disabled for '%s'; falling back to heuristic screening.", paper.title)
             stage_one = self.scorer.quick_screen(paper, topic_match=topic_match)
             if self.config.log_screening_decisions and self.config.verbosity in {"verbose", "ultra_verbose"}:
                 LOGGER.info("Heuristic Stage 1 for '%s': %s", paper.title, stage_one)
-            return self.scorer.deep_score(paper, stage_one_decision=stage_one, topic_match=topic_match)
+            if stage_one == "exclude":
+                result = self.scorer.deep_score(paper, stage_one_decision=stage_one, topic_match=topic_match)
+                return _annotate_passes(result, ta_decision="exclude", ft_decision=None)
+            result = self.scorer.deep_score(paper, stage_one_decision=stage_one, topic_match=topic_match)
+            return _annotate_passes(
+                result,
+                ta_decision=_ta_from_stage_one(stage_one),
+                ft_decision=result.decision if has_full_text else None,
+            )
 
-        LOGGER.debug("Starting LLM Stage 1 for '%s'.", paper.title)
+        LOGGER.debug("Starting LLM Stage 1 (T/A) for '%s'.", paper.title)
         stage_one = self._llm_stage_one(paper) or self.scorer.quick_screen(paper, topic_match=topic_match)
         if self.config.log_screening_decisions and self.config.verbosity in {"verbose", "ultra_verbose"}:
             LOGGER.info("LLM Stage 1 for '%s': %s", paper.title, stage_one)
         if stage_one == "exclude":
-            return self.scorer.deep_score(paper, stage_one_decision=stage_one, topic_match=topic_match)
+            result = self.scorer.deep_score(paper, stage_one_decision=stage_one, topic_match=topic_match)
+            return _annotate_passes(result, ta_decision="exclude", ft_decision=None)
 
-        LOGGER.debug("Starting LLM Stage 2 for '%s' after Stage 1 decision '%s'.", paper.title, stage_one)
+        LOGGER.debug("Starting LLM Stage 2 (FT) for '%s' after Stage 1 decision '%s'.", paper.title, stage_one)
         llm_result = self._llm_stage_two(paper, stage_one)
         if llm_result is not None:
             LOGGER.info(
@@ -120,8 +163,18 @@ class AIScreener:
                 llm_result.decision,
                 llm_result.relevance_score,
             )
-            return _enrich_with_topic_match(llm_result, topic_match)
-        return self.scorer.deep_score(paper, stage_one_decision=stage_one, topic_match=topic_match)
+            result = _enrich_with_topic_match(llm_result, topic_match)
+            return _annotate_passes(
+                result,
+                ta_decision=_ta_from_stage_one(stage_one),
+                ft_decision=result.decision if has_full_text else None,
+            )
+        result = self.scorer.deep_score(paper, stage_one_decision=stage_one, topic_match=topic_match)
+        return _annotate_passes(
+            result,
+            ta_decision=_ta_from_stage_one(stage_one),
+            ft_decision=result.decision if has_full_text else None,
+        )
 
     def summarize_review(self, papers: list[PaperMetadata]) -> str | None:
         """Summarize a shortlist into narrative review text when an LLM is available."""

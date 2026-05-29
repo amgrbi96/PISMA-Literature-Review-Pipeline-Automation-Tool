@@ -54,6 +54,13 @@ class ScreeningResult(BaseModel):
     exclusion_reason: str = ""
     exclusion_code: ExclusionCode | None = None
     screening_context_key: str | None = None
+    ta_decision: DecisionLabel | None = None
+    ta_exclusion_code: ExclusionCode | None = None
+    ta_confidence: float | None = None
+    ft_decision: DecisionLabel | None = None
+    ft_exclusion_code: ExclusionCode | None = None
+    ft_confidence: float | None = None
+    screening_pass: str = "ta"
 
 
 class PaperMetadata(BaseModel):
