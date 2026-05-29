@@ -212,6 +212,10 @@ class ResearchConfig(BaseModel):
     llm_provider: Literal["auto", "heuristic", "openai_compatible", "gemini", "ollama", "huggingface_local"] = "auto"
     decision_mode: Literal["strict", "triage"] = "strict"
     maybe_threshold_margin: float = 10.0
+    screening_confidence_threshold: float = 80.0
+    rob_confidence_threshold: float = 80.0
+    extraction_confidence_threshold: float = 85.0
+    grade_confidence_threshold: float = 75.0
     run_mode: Literal["collect", "analyze"] = "analyze"
     verbosity: Literal["normal", "verbose", "ultra_verbose"] = "ultra_verbose"
     output_csv: bool = True
@@ -1019,6 +1023,26 @@ class ResearchConfig(BaseModel):
                 getattr(args, "maybe_threshold_margin", None),
                 10.0,
             ),
+            screening_confidence_threshold=value_for(
+                "screening_confidence_threshold",
+                getattr(args, "screening_confidence_threshold", None),
+                80.0,
+            ),
+            rob_confidence_threshold=value_for(
+                "rob_confidence_threshold",
+                getattr(args, "rob_confidence_threshold", None),
+                80.0,
+            ),
+            extraction_confidence_threshold=value_for(
+                "extraction_confidence_threshold",
+                getattr(args, "extraction_confidence_threshold", None),
+                85.0,
+            ),
+            grade_confidence_threshold=value_for(
+                "grade_confidence_threshold",
+                getattr(args, "grade_confidence_threshold", None),
+                75.0,
+            ),
             run_mode=run_mode,
             verbosity=verbosity,
             discovery_strategy=value_for(
@@ -1604,6 +1628,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         dest="maybe_threshold_margin",
         help="Score margin below threshold that still counts as maybe in triage mode",
     )
+    parser.add_argument("--screening-confidence-threshold", type=float, help="Confidence threshold for screening decisions (default: 80)")
+    parser.add_argument("--rob-confidence-threshold", type=float, help="Confidence threshold for risk-of-bias judgments (default: 80)")
+    parser.add_argument("--extraction-confidence-threshold", type=float, help="Confidence threshold for data extraction (default: 85)")
+    parser.add_argument("--grade-confidence-threshold", type=float, help="Confidence threshold for GRADE ratings (default: 75)")
     parser.add_argument(
         "--full-text-max-chars",
         type=int,
