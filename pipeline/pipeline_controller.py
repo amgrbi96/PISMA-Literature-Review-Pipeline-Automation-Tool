@@ -928,6 +928,19 @@ class PipelineController:
             "screening_context_key": self.config.screening_context_key,
             "final_pass": final_pass_name,
             "passes": passes,
+            "source_database": paper.source,
+            "ta_criteria_matched": final_result.matched_inclusion_criteria,
+            "ft_retrieval_method": paper.retrieval_method,
+            "final_status": (
+                "INCLUDED" if final_result.decision == "include" else
+                "EXCLUDED" if final_result.decision == "exclude" else
+                "UNCERTAIN"
+            ),
+            "exclusion_stage": (
+                "TA" if final_result.ta_decision == "exclude" and not final_result.ft_decision
+                else "FT" if final_result.ft_decision == "exclude"
+                else ""
+            ),
         }
         return final_result, screening_details
 
