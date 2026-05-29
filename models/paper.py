@@ -53,6 +53,7 @@ class ScreeningResult(BaseModel):
     retain_reason: str = ""
     exclusion_reason: str = ""
     exclusion_code: ExclusionCode | None = None
+    confidence: float = 0.0
     screening_context_key: str | None = None
     ta_decision: DecisionLabel | None = None
     ta_exclusion_code: ExclusionCode | None = None

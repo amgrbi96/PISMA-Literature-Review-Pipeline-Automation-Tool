@@ -26,15 +26,21 @@ def _annotate_passes(
         ta_decision: str | None,
         ft_decision: str | None,
 ) -> ScreeningResult:
-    """Add two-pass screening annotations to a ScreeningResult."""
+    """Add two-pass screening annotations and compute confidence."""
 
-    confidence = abs(result.relevance_score or 0) / 100.0
+    score = result.relevance_score or 0
+    criteria_matched = len(result.matched_inclusion_criteria) + len(result.matched_exclusion_criteria)
+    criteria_signal = min(criteria_matched / max(criteria_matched + 1, 1), 1.0) * 15
+    llm_signal = 10 if result.explanation and len(result.explanation) > 50 else 0
+    confidence = min(100.0, max(0.0, abs(score) + criteria_signal + llm_signal))
+
     update = {
+        "confidence": round(confidence, 1),
         "ta_decision": cast(DecisionLabel | None, ta_decision),
-        "ta_confidence": round(confidence, 3),
+        "ta_confidence": round(confidence / 100.0, 3),
         "ta_exclusion_code": result.exclusion_code if ta_decision == "exclude" else None,
         "ft_decision": cast(DecisionLabel | None, ft_decision),
-        "ft_confidence": round(confidence, 3) if ft_decision else None,
+        "ft_confidence": round(confidence / 100.0, 3) if ft_decision else None,
         "ft_exclusion_code": result.exclusion_code if ft_decision == "exclude" else None,
         "screening_pass": "ft" if ft_decision else "ta",
     }
