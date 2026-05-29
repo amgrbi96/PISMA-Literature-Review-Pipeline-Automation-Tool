@@ -42,6 +42,7 @@ from utils.text_processing import stable_hash
 from utils.checkpoints import write_checkpoint
 from utils.deduplication import DeduplicationResult
 from utils.source_verification import verify_sources
+from utils.search_reproducibility import verify_search_reproducibility
 
 LOGGER = logging.getLogger(__name__)
 
@@ -140,6 +141,7 @@ class PipelineController:
         self.search_query_records: list[SourceQueryRecord] = []
         self.metadata_quality_report: dict[str, Any] | None = None
         self.verification_verdicts: list[Any] = []
+        self.search_reproducibility_results: list[Any] = []
         self.gate_checker = GateChecker()
         if self.config.citation_snowballing_enabled and isinstance(citation_provider, NullCitationProvider):
             LOGGER.info("Citation snowballing is enabled, but no citation-capable API source is active; skipping expansion.")
@@ -197,6 +199,11 @@ class PipelineController:
                 LOGGER.info("Discovery completed with %s records.", len(discovered))
                 write_checkpoint(discovered, "post_discovery", self.config.results_dir,
                                  extra={"source_query_records": [r.__dict__ for r in self.search_query_records]})
+                if self.search_query_records:
+                    self.search_reproducibility_results = verify_search_reproducibility(
+                        [r.__dict__ for r in self.search_query_records],
+                        self.config,
+                    )
                 dedup_result = deduplicate_papers_with_trail(
                     discovered,
                     title_similarity_threshold=self.config.title_similarity_threshold,
@@ -511,6 +518,17 @@ class PipelineController:
                     "detail": v.detail,
                 }
                 for v in self.verification_verdicts
+            ],
+            "search_reproducibility": [
+                {
+                    "source": r.source,
+                    "original_count": r.original_count,
+                    "verification_count": r.verification_count,
+                    "discrepancy_pct": r.discrepancy_pct,
+                    "classification": r.classification,
+                    "detail": r.detail,
+                }
+                for r in self.search_reproducibility_results
             ],
             "source_query_records": [
                 {

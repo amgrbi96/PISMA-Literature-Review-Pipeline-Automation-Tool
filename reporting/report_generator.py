@@ -351,6 +351,11 @@ class ReportGenerator:
             ver_path = self._write_source_verification_json(verification_data)
             outputs["source_verification_json"] = str(ver_path)
 
+        repro_data = (stats or {}).get("search_reproducibility")
+        if repro_data:
+            repro_path = self._write_search_reproducibility_json(repro_data)
+            outputs["search_reproducibility_json"] = str(repro_path)
+
         return outputs
 
     def _clear_previous_outputs(self) -> None:
@@ -382,6 +387,7 @@ class ReportGenerator:
                 "checkpoint_duplicates.json",
                 "retrieval_log.json",
                 "source_verification.json",
+                "search_reproducibility.json",
         ):
             path = Path(self.config.results_dir) / filename
             if path.exists():
@@ -787,7 +793,24 @@ class ReportGenerator:
         self._write_json_artifact(path, payload)
         return path
 
-    def _write_ris_export(self, papers: list[PaperMetadata], filename: str = "papers.ris") -> Path:
+    def _write_search_reproducibility_json(self, results: list[dict[str, Any]]) -> Path:
+        path = Path(self.config.results_dir) / "search_reproducibility.json"
+        verified = sum(1 for r in results if r.get("classification") == "SEARCH_VERIFIED")
+        approximate = sum(1 for r in results if r.get("classification") == "SEARCH_APPROXIMATE")
+        unverified = sum(1 for r in results if r.get("classification") == "SEARCH_UNVERIFIED")
+        not_checked = sum(1 for r in results if r.get("classification") == "NOT_VERIFIED")
+        payload = {
+            "summary": {
+                "total_sources": len(results),
+                "verified": verified,
+                "approximate": approximate,
+                "unverified": unverified,
+                "not_checked": not_checked,
+            },
+            "results": results,
+        }
+        self._write_json_artifact(path, payload)
+        return path
         path = Path(self.config.results_dir) / filename
         entries: list[str] = []
         for paper in papers:
