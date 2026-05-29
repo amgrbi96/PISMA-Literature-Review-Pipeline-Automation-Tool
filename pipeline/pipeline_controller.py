@@ -35,6 +35,7 @@ from discovery.semantic_scholar_client import SemanticScholarClient
 from discovery.springer_client import SpringerClient
 from models.paper import PaperMetadata, ScreeningResult
 from reporting.report_generator import ReportGenerator
+from pipeline.gate_checker import GateChecker, GateCondition
 from utils.deduplication import deduplicate_papers, deduplicate_papers_with_trail
 from utils.http import configure_http_logging, configure_http_runtime
 from utils.text_processing import stable_hash
@@ -137,6 +138,7 @@ class PipelineController:
         self.report_generator = ReportGenerator(self.config, self.ai_screener)
         self.search_query_records: list[SourceQueryRecord] = []
         self.metadata_quality_report: dict[str, Any] | None = None
+        self.gate_checker = GateChecker()
         if self.config.citation_snowballing_enabled and isinstance(citation_provider, NullCitationProvider):
             LOGGER.info("Citation snowballing is enabled, but no citation-capable API source is active; skipping expansion.")
         if self._requires_local_llm_serial_execution():
@@ -266,15 +268,35 @@ class PipelineController:
             else:
                 quality_report = self._validate_metadata_quality(current_papers)
                 self.metadata_quality_report = quality_report
-                if quality_report["halt"]:
+
+                self.gate_checker.register("pre_screening", [
+                    GateCondition(
+                        name="metadata_quality",
+                        check=lambda: (
+                            not quality_report["halt"],
+                            f"Metadata quality issues: {quality_report['issues']}" if quality_report["halt"] else "OK",
+                        ),
+                        remediation="Fix metadata issues: ensure all records have titles and abstract coverage ≥80%.",
+                    ),
+                    GateCondition(
+                        name="papers_available",
+                        check=lambda: (
+                            len(current_papers) > 0,
+                            f"No papers available for screening ({len(current_papers)} papers)",
+                        ),
+                        remediation="Check discovery configuration and ensure sources are returning results.",
+                    ),
+                ])
+                gate_result = self.gate_checker.evaluate("pre_screening")
+                if not gate_result.passed:
                     LOGGER.error(
-                        "Metadata quality gate failed: %s. Halting before screening.",
-                        quality_report["issues"],
+                        "Gate 'pre_screening' FAILED — %s conditions unchecked.",
+                        len(gate_result.failures),
                     )
                     self._emit_event(
                         "gate_failed",
-                        gate="metadata_quality",
-                        issues=quality_report["issues"],
+                        gate="pre_screening",
+                        failures=[f["name"] for f in gate_result.failures],
                     )
                     final_papers = self._normalize_papers_for_current_context(
                         self.database.get_papers_for_query(self.config.query_key or "")
@@ -285,9 +307,8 @@ class PipelineController:
                         deduplicated_count=len(deduplicated),
                         snowballing_added_count=len(expanded) if expanded else 0,
                         screening_stats={"screened_count": 0, "full_text_screened_count": 0},
-                        run_status="failed_metadata_quality_gate",
-                        run_error=f"Metadata quality gate failed: {quality_report['issues']}",
-                        extra_result_fields={"metadata_quality_report": quality_report},
+                        run_status="failed_gate_pre_screening",
+                        run_error=f"Gate 'pre_screening' failed: {[f['name'] for f in gate_result.failures]}",
                     )
                 screening_stats = self._screen_papers()
                 screened_papers = self.database.get_papers_for_query(self.config.query_key or "")
@@ -465,6 +486,7 @@ class PipelineController:
             "run_mode": self.config.run_mode,
             "partial_rerun_mode": self.config.partial_rerun_mode,
             "metadata_quality_report": self.metadata_quality_report,
+            "gate_summary": self.gate_checker.summary(),
             "source_query_records": [
                 {
                     "source": rec.source,
